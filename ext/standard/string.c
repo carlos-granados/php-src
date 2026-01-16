@@ -1889,6 +1889,166 @@ PHP_FUNCTION(str_ends_with)
 }
 /* }}} */
 
+/* {{{ Adds prefix to source string if source does not already start with prefix */
+PHP_FUNCTION(add_prefix)
+{
+	zend_string *source, *prefix;
+
+	ZEND_PARSE_PARAMETERS_START(2, 2)
+		Z_PARAM_STR(source)
+		Z_PARAM_STR(prefix)
+	ZEND_PARSE_PARAMETERS_END();
+
+	if (ZSTR_LEN(prefix) == 0) {
+		RETURN_STR_COPY(source);
+	}
+
+	if (ZSTR_LEN(prefix) <= ZSTR_LEN(source) &&
+		memcmp(ZSTR_VAL(source), ZSTR_VAL(prefix), ZSTR_LEN(prefix)) == 0) {
+		RETURN_STR_COPY(source);
+	}
+
+	zend_string *result = zend_string_alloc(ZSTR_LEN(prefix) + ZSTR_LEN(source), 0);
+	memcpy(ZSTR_VAL(result), ZSTR_VAL(prefix), ZSTR_LEN(prefix));
+	memcpy(ZSTR_VAL(result) + ZSTR_LEN(prefix), ZSTR_VAL(source), ZSTR_LEN(source));
+	ZSTR_VAL(result)[ZSTR_LEN(prefix) + ZSTR_LEN(source)] = '\0';
+	RETURN_NEW_STR(result);
+}
+/* }}} */
+
+/* {{{ Removes prefix from source string if source starts with prefix */
+PHP_FUNCTION(remove_prefix)
+{
+	zend_string *source, *prefix;
+
+	ZEND_PARSE_PARAMETERS_START(2, 2)
+		Z_PARAM_STR(source)
+		Z_PARAM_STR(prefix)
+	ZEND_PARSE_PARAMETERS_END();
+
+	if (ZSTR_LEN(prefix) > ZSTR_LEN(source)) {
+		RETURN_STR_COPY(source);
+	}
+
+	if (memcmp(ZSTR_VAL(source), ZSTR_VAL(prefix), ZSTR_LEN(prefix)) == 0) {
+		RETURN_STRINGL(ZSTR_VAL(source) + ZSTR_LEN(prefix), ZSTR_LEN(source) - ZSTR_LEN(prefix));
+	}
+
+	RETURN_STR_COPY(source);
+}
+/* }}} */
+
+/* {{{ Replaces prefix in source string if source starts with prefix */
+PHP_FUNCTION(replace_prefix)
+{
+	zend_string *source, *prefix, *replace;
+
+	ZEND_PARSE_PARAMETERS_START(3, 3)
+		Z_PARAM_STR(source)
+		Z_PARAM_STR(prefix)
+		Z_PARAM_STR(replace)
+	ZEND_PARSE_PARAMETERS_END();
+
+	if (ZSTR_LEN(prefix) > ZSTR_LEN(source)) {
+		RETURN_STR_COPY(source);
+	}
+
+	if (memcmp(ZSTR_VAL(source), ZSTR_VAL(prefix), ZSTR_LEN(prefix)) == 0) {
+		size_t remaining_len = ZSTR_LEN(source) - ZSTR_LEN(prefix);
+		zend_string *result = zend_string_alloc(ZSTR_LEN(replace) + remaining_len, 0);
+		memcpy(ZSTR_VAL(result), ZSTR_VAL(replace), ZSTR_LEN(replace));
+		memcpy(ZSTR_VAL(result) + ZSTR_LEN(replace), ZSTR_VAL(source) + ZSTR_LEN(prefix), remaining_len);
+		ZSTR_VAL(result)[ZSTR_LEN(replace) + remaining_len] = '\0';
+		RETURN_NEW_STR(result);
+	}
+
+	RETURN_STR_COPY(source);
+}
+/* }}} */
+
+/* {{{ Adds suffix to source string if source does not already end with suffix */
+PHP_FUNCTION(add_suffix)
+{
+	zend_string *source, *suffix;
+
+	ZEND_PARSE_PARAMETERS_START(2, 2)
+		Z_PARAM_STR(source)
+		Z_PARAM_STR(suffix)
+	ZEND_PARSE_PARAMETERS_END();
+
+	if (ZSTR_LEN(suffix) == 0) {
+		RETURN_STR_COPY(source);
+	}
+
+	if (ZSTR_LEN(suffix) <= ZSTR_LEN(source) &&
+		memcmp(
+			ZSTR_VAL(source) + ZSTR_LEN(source) - ZSTR_LEN(suffix),
+			ZSTR_VAL(suffix), ZSTR_LEN(suffix)) == 0) {
+		RETURN_STR_COPY(source);
+	}
+
+	zend_string *result = zend_string_alloc(ZSTR_LEN(source) + ZSTR_LEN(suffix), 0);
+	memcpy(ZSTR_VAL(result), ZSTR_VAL(source), ZSTR_LEN(source));
+	memcpy(ZSTR_VAL(result) + ZSTR_LEN(source), ZSTR_VAL(suffix), ZSTR_LEN(suffix));
+	ZSTR_VAL(result)[ZSTR_LEN(source) + ZSTR_LEN(suffix)] = '\0';
+	RETURN_NEW_STR(result);
+}
+/* }}} */
+
+/* {{{ Removes suffix from source string if source ends with suffix */
+PHP_FUNCTION(remove_suffix)
+{
+	zend_string *source, *suffix;
+
+	ZEND_PARSE_PARAMETERS_START(2, 2)
+		Z_PARAM_STR(source)
+		Z_PARAM_STR(suffix)
+	ZEND_PARSE_PARAMETERS_END();
+
+	if (ZSTR_LEN(suffix) > ZSTR_LEN(source)) {
+		RETURN_STR_COPY(source);
+	}
+
+	if (memcmp(
+		ZSTR_VAL(source) + ZSTR_LEN(source) - ZSTR_LEN(suffix),
+		ZSTR_VAL(suffix), ZSTR_LEN(suffix)) == 0) {
+		RETURN_STRINGL(ZSTR_VAL(source), ZSTR_LEN(source) - ZSTR_LEN(suffix));
+	}
+
+	RETURN_STR_COPY(source);
+}
+/* }}} */
+
+/* {{{ Replaces suffix in source string if source ends with suffix */
+PHP_FUNCTION(replace_suffix)
+{
+	zend_string *source, *suffix, *replace;
+
+	ZEND_PARSE_PARAMETERS_START(3, 3)
+		Z_PARAM_STR(source)
+		Z_PARAM_STR(suffix)
+		Z_PARAM_STR(replace)
+	ZEND_PARSE_PARAMETERS_END();
+
+	if (ZSTR_LEN(suffix) > ZSTR_LEN(source)) {
+		RETURN_STR_COPY(source);
+	}
+
+	if (memcmp(
+		ZSTR_VAL(source) + ZSTR_LEN(source) - ZSTR_LEN(suffix),
+		ZSTR_VAL(suffix), ZSTR_LEN(suffix)) == 0) {
+		size_t base_len = ZSTR_LEN(source) - ZSTR_LEN(suffix);
+		zend_string *result = zend_string_alloc(base_len + ZSTR_LEN(replace), 0);
+		memcpy(ZSTR_VAL(result), ZSTR_VAL(source), base_len);
+		memcpy(ZSTR_VAL(result) + base_len, ZSTR_VAL(replace), ZSTR_LEN(replace));
+		ZSTR_VAL(result)[base_len + ZSTR_LEN(replace)] = '\0';
+		RETURN_NEW_STR(result);
+	}
+
+	RETURN_STR_COPY(source);
+}
+/* }}} */
+
 static inline void _zend_strpos(zval *return_value, zend_string *haystack, zend_string *needle, zend_long offset)
 {
 	const char *found = NULL;
