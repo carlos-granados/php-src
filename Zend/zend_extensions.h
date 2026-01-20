@@ -140,6 +140,9 @@ ZEND_API extern uint32_t zend_extension_flags;
 #define ZEND_EXTENSIONS_HAVE_OP_ARRAY_HANDLER      (1<<2)
 #define ZEND_EXTENSIONS_HAVE_OP_ARRAY_PERSIST_CALC (1<<3)
 #define ZEND_EXTENSIONS_HAVE_OP_ARRAY_PERSIST      (1<<4)
+#define ZEND_EXTENSIONS_HAVE_STATEMENT_HANDLER     (1<<5)
+#define ZEND_EXTENSIONS_HAVE_FCALL_BEGIN_HANDLER   (1<<6)
+#define ZEND_EXTENSIONS_HAVE_FCALL_END_HANDLER     (1<<7)
 
 void zend_extension_dtor(zend_extension *extension);
 ZEND_API void zend_append_version_info(const zend_extension *extension);

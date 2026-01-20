@@ -140,7 +140,6 @@ void init_executor(void) /* {{{ */
 
 	EG(symtable_cache_ptr) = EG(symtable_cache);
 	EG(symtable_cache_limit) = EG(symtable_cache) + SYMTABLE_CACHE_SIZE;
-	EG(no_extensions) = 0;
 
 	EG(function_table) = CG(function_table);
 	EG(class_table) = CG(class_table);
@@ -1333,6 +1332,7 @@ ZEND_API zend_result zend_eval_stringl(const char *str, size_t str_len, zval *re
 	uint32_t original_compiler_options;
 	zend_result retval;
 	zend_string *code_str;
+	uint32_t original_zend_extension_flags;
 
 	if (retval_ptr) {
 		code_str = zend_string_concat3(
@@ -1351,7 +1351,10 @@ ZEND_API zend_result zend_eval_stringl(const char *str, size_t str_len, zval *re
 	if (new_op_array) {
 		zval local_retval;
 
-		EG(no_extensions)=1;
+		original_zend_extension_flags = zend_extension_flags;
+		zend_extension_flags &= ~ZEND_EXTENSIONS_HAVE_STATEMENT_HANDLER;
+		zend_extension_flags &= ~ZEND_EXTENSIONS_HAVE_FCALL_BEGIN_HANDLER;
+		zend_extension_flags &= ~ZEND_EXTENSIONS_HAVE_FCALL_END_HANDLER;
 
 		new_op_array->scope = zend_get_executed_scope();
 
@@ -1376,7 +1379,8 @@ ZEND_API zend_result zend_eval_stringl(const char *str, size_t str_len, zval *re
 			}
 		}
 
-		EG(no_extensions)=0;
+		zend_extension_flags = original_zend_extension_flags;
+;
 		zend_destroy_static_vars(new_op_array);
 		destroy_op_array(new_op_array);
 		efree_size(new_op_array, sizeof(zend_op_array));

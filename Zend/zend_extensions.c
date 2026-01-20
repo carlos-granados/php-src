@@ -174,6 +174,15 @@ void zend_register_extension(zend_extension *new_extension, DL_HANDLE handle)
 	if (extension.op_array_persist) {
 		zend_extension_flags |= ZEND_EXTENSIONS_HAVE_OP_ARRAY_PERSIST;
 	}
+	if (extension.statement_handler) {
+		zend_extension_flags |= ZEND_EXTENSIONS_HAVE_STATEMENT_HANDLER;
+	}
+	if (extension.fcall_begin_handler) {
+		zend_extension_flags |= ZEND_EXTENSIONS_HAVE_FCALL_BEGIN_HANDLER;
+	}
+	if (extension.fcall_end_handler) {
+		zend_extension_flags |= ZEND_EXTENSIONS_HAVE_FCALL_END_HANDLER;
+	}
 	/*fprintf(stderr, "Loaded %s, version %s\n", extension.name, extension.version);*/
 #endif
 }

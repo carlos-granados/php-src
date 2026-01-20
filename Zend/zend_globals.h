@@ -212,9 +212,6 @@ struct _zend_executor_globals {
 	uint32_t persistent_functions_count;
 	uint32_t persistent_classes_count;
 
-	/* for extended information support */
-	bool no_extensions;
-
 	bool full_tables_cleanup;
 
 	zend_atomic_bool vm_interrupt;

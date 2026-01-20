@@ -3206,7 +3206,7 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 {
 	USE_OPLINE
 
-	if (!EG(no_extensions)) {
+	if (zend_extension_flags & ZEND_EXTENSIONS_HAVE_STATEMENT_HANDLER) {
 		SAVE_OPLINE();
 		zend_llist_apply_with_argument(&zend_extensions, (llist_apply_with_arg_func_t) zend_extension_statement_handler, execute_data);
 		ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
@@ -3218,7 +3218,7 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 {
 	USE_OPLINE
 
-	if (!EG(no_extensions)) {
+	if (zend_extension_flags & ZEND_EXTENSIONS_HAVE_FCALL_BEGIN_HANDLER) {
 		SAVE_OPLINE();
 		zend_llist_apply_with_argument(&zend_extensions, (llist_apply_with_arg_func_t) zend_extension_fcall_begin_handler, execute_data);
 		ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
@@ -3230,7 +3230,7 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 {
 	USE_OPLINE
 
-	if (!EG(no_extensions)) {
+	if (zend_extension_flags & ZEND_EXTENSIONS_HAVE_FCALL_END_HANDLER) {
 		SAVE_OPLINE();
 		zend_llist_apply_with_argument(&zend_extensions, (llist_apply_with_arg_func_t) zend_extension_fcall_end_handler, execute_data);
 		ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
@@ -58966,7 +58966,7 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_EXT_S
 {
 	USE_OPLINE
 
-	if (!EG(no_extensions)) {
+	if (zend_extension_flags & ZEND_EXTENSIONS_HAVE_STATEMENT_HANDLER) {
 		SAVE_OPLINE();
 		zend_llist_apply_with_argument(&zend_extensions, (llist_apply_with_arg_func_t) zend_extension_statement_handler, execute_data);
 		ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
@@ -58978,7 +58978,7 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_EXT_F
 {
 	USE_OPLINE
 
-	if (!EG(no_extensions)) {
+	if (zend_extension_flags & ZEND_EXTENSIONS_HAVE_FCALL_BEGIN_HANDLER) {
 		SAVE_OPLINE();
 		zend_llist_apply_with_argument(&zend_extensions, (llist_apply_with_arg_func_t) zend_extension_fcall_begin_handler, execute_data);
 		ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
@@ -58990,7 +58990,7 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_EXT_F
 {
 	USE_OPLINE
 
-	if (!EG(no_extensions)) {
+	if (zend_extension_flags & ZEND_EXTENSIONS_HAVE_FCALL_END_HANDLER) {
 		SAVE_OPLINE();
 		zend_llist_apply_with_argument(&zend_extensions, (llist_apply_with_arg_func_t) zend_extension_fcall_end_handler, execute_data);
 		ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();

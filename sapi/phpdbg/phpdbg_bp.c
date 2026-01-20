@@ -1113,7 +1113,9 @@ static inline phpdbg_breakbase_t *phpdbg_find_conditional_breakpoint(zend_execut
 			}
 		}
 
-		EG(no_extensions) = 1;
+		zend_extension_flags &= ~ZEND_EXTENSIONS_HAVE_STATEMENT_HANDLER;
+		zend_extension_flags &= ~ZEND_EXTENSIONS_HAVE_FCALL_BEGIN_HANDLER;
+		zend_extension_flags &= ~ZEND_EXTENSIONS_HAVE_FCALL_END_HANDLER;
 
 		zend_rebuild_symbol_table();
 
@@ -1125,7 +1127,9 @@ static inline phpdbg_breakbase_t *phpdbg_find_conditional_breakpoint(zend_execut
 			}
  		} zend_end_try();
 
-		EG(no_extensions) = 1;
+		zend_extension_flags &= ~ZEND_EXTENSIONS_HAVE_STATEMENT_HANDLER;
+		zend_extension_flags &= ~ZEND_EXTENSIONS_HAVE_FCALL_BEGIN_HANDLER;
+		zend_extension_flags &= ~ZEND_EXTENSIONS_HAVE_FCALL_END_HANDLER;
 		EG(current_execute_data)->opline = orig_opline;
 		EG(current_execute_data)->func = orig_func;
 		EG(current_execute_data)->return_value = orig_retval;
