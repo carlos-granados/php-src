@@ -2454,29 +2454,6 @@ static zend_never_inline void zend_assign_op_overloaded_property(zend_object *ob
 }
 
 /* Utility Functions for Extensions */
-static void zend_extension_statement_handler(const zend_extension *extension, zend_execute_data *frame)
-{
-	if (extension->statement_handler) {
-		extension->statement_handler(frame);
-	}
-}
-
-
-static void zend_extension_fcall_begin_handler(const zend_extension *extension, zend_execute_data *frame)
-{
-	if (extension->fcall_begin_handler) {
-		extension->fcall_begin_handler(frame);
-	}
-}
-
-
-static void zend_extension_fcall_end_handler(const zend_extension *extension, zend_execute_data *frame)
-{
-	if (extension->fcall_end_handler) {
-		extension->fcall_end_handler(frame);
-	}
-}
-
 
 static zend_always_inline HashTable *zend_get_target_symbol_table(int fetch_type EXECUTE_DATA_DC)
 {

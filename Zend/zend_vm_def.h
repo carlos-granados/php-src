@@ -7916,11 +7916,6 @@ ZEND_VM_COLD_HANDLER(101, ZEND_EXT_STMT, ANY, ANY)
 {
 	USE_OPLINE
 
-	if (zend_extension_flags & ZEND_EXTENSIONS_HAVE_STATEMENT_HANDLER) {
-		SAVE_OPLINE();
-		zend_llist_apply_with_argument(&zend_extensions, (llist_apply_with_arg_func_t) zend_extension_statement_handler, execute_data);
-		ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
-	}
 	ZEND_VM_NEXT_OPCODE();
 }
 
@@ -7928,11 +7923,6 @@ ZEND_VM_COLD_HANDLER(102, ZEND_EXT_FCALL_BEGIN, ANY, ANY)
 {
 	USE_OPLINE
 
-	if (zend_extension_flags & ZEND_EXTENSIONS_HAVE_FCALL_BEGIN_HANDLER) {
-		SAVE_OPLINE();
-		zend_llist_apply_with_argument(&zend_extensions, (llist_apply_with_arg_func_t) zend_extension_fcall_begin_handler, execute_data);
-		ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
-	}
 	ZEND_VM_NEXT_OPCODE();
 }
 
@@ -7940,11 +7930,6 @@ ZEND_VM_COLD_HANDLER(103, ZEND_EXT_FCALL_END, ANY, ANY)
 {
 	USE_OPLINE
 
-	if (zend_extension_flags & ZEND_EXTENSIONS_HAVE_FCALL_END_HANDLER) {
-		SAVE_OPLINE();
-		zend_llist_apply_with_argument(&zend_extensions, (llist_apply_with_arg_func_t) zend_extension_fcall_end_handler, execute_data);
-		ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
-	}
 	ZEND_VM_NEXT_OPCODE();
 }
 
