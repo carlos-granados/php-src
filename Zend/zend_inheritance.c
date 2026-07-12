@@ -8026,7 +8026,7 @@ ZEND_API zend_function *zend_try_synthesize_function_monomorph_by_name(zend_stri
 	for (uint32_t i = 0; i < count; i++) nwa->args[i] = args[i];
 	ZEND_TYPE_SET_PTR(args_box, nwa);
 	ZEND_TYPE_FULL_MASK(args_box) |= _ZEND_TYPE_NAMED_WITH_ARGS_BIT;
-	zend_check_generic_call_arguments(base, count, &args_box);
+	zend_check_generic_call_arguments(base, count, &args_box, NULL);
 	efree(nwa);
 	if (UNEXPECTED(EG(exception))) {
 		for (uint32_t i = 0; i < count; i++) zend_type_release(args[i], false);

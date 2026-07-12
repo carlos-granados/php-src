@@ -12,7 +12,7 @@ echo "param: ", $r->getParameters()[0]->getType(), "\n";
 echo "return: ", $r->getReturnType(), "\n";
 
 class BarFoo implements Bar, Foo {}
-var_dump(pickIface(new BarFoo) instanceof BarFoo);
+var_dump(pickIface::<BarFoo>(new BarFoo) instanceof BarFoo);
 ?>
 --EXPECT--
 param: Bar&Foo

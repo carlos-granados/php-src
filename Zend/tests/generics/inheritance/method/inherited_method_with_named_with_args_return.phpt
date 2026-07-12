@@ -10,7 +10,7 @@ class Box<out T> {
 
 class StringBox extends Box<string> {}
 
-$b = StringBox::create("hello");
+$b = StringBox::create::<string>("hello");
 var_dump($b instanceof Box);
 $rm = (new ReflectionMethod(StringBox::class, 'create'));
 echo "return type: ", (string)$rm->getReturnType(), "\n";

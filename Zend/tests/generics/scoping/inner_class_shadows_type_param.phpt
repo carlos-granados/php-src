@@ -9,7 +9,7 @@ function f<T>(): void {
     $x = new T();
     echo $x->v, "\n";
 }
-f();
+f::<stdClass>();
 ?>
 --EXPECT--
 7

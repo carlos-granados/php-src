@@ -1,5 +1,5 @@
 --TEST--
-Reification: T appearing in multiple arg positions — the first hit wins (subsequent objects of compatible types don't update)
+Reification: T in multiple arg positions — one explicit binding checks every argument
 --FILE--
 <?php
 class Foo {}
@@ -9,16 +9,24 @@ function pair<T : object>(T $a, T $b): string {
     return T::class;
 }
 
-// Both args are Foo — T inferred as Foo
-var_dump(pair(new Foo(), new Foo()));
+// Both args are Foo.
+var_dump(pair::<Foo>(new Foo(), new Foo()));
 
-// First arg pins T to Bar; second is also a Bar, fine
-var_dump(pair(new Bar(), new Bar()));
+// Both args are Bar.
+var_dump(pair::<Bar>(new Bar(), new Bar()));
 
-// First arg Foo, second Bar — T pinned to Foo (first wins)
-var_dump(pair(new Foo(), new Bar()));
+// T pinned to Foo; a Bar in the second position satisfies it (subtype).
+var_dump(pair::<Foo>(new Foo(), new Bar()));
+
+// T pinned to Bar; a plain Foo does not satisfy it.
+try {
+    pair::<Bar>(new Foo(), new Bar());
+} catch (TypeError $e) {
+    echo "TypeError\n";
+}
 ?>
 --EXPECT--
 string(3) "Foo"
 string(3) "Bar"
 string(3) "Foo"
+TypeError

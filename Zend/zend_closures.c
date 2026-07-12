@@ -953,6 +953,13 @@ void zend_closure_from_frame(zval *return_value, const zend_execute_data *call) 
 		zend_create_fake_closure(return_value, mptr, mptr->common.scope, Z_CE(call->This), NULL);
 	}
 
+	/* Turbofish first-class callable: the pending frame's resolved type-arg
+	 * table (installed by VERIFY_GENERIC_ARGUMENTS at creation) becomes the
+	 * closure's captured bindings, installed onto every invocation frame. */
+	if (call->type_args) {
+		zend_closure_capture_type_args(return_value, call->type_args);
+	}
+
 	if (&mptr->internal_function == &trampoline) {
 		zend_string_release(mptr->common.function_name);
 	}

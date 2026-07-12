@@ -9196,7 +9196,7 @@ ZEND_VM_HANDLER(212, ZEND_VERIFY_GENERIC_ARGUMENTS, TMP|UNUSED, UNUSED)
 			 * The persisted guard excludes the no-opcache heap-table case. */
 			bool checked = (cache_slot && cache_slot[0] == (void *) call->func);
 			if (!checked) {
-				zend_check_generic_call_arguments(call->func, arity, args_box);
+				zend_check_generic_call_arguments(call->func, arity, args_box, call->type_args);
 			}
 			if (EXPECTED(!EG(exception))) {
 				if (!checked && cache_slot) {
@@ -9208,10 +9208,16 @@ ZEND_VM_HANDLER(212, ZEND_VERIFY_GENERIC_ARGUMENTS, TMP|UNUSED, UNUSED)
 				}
 			}
 		} else {
-			zend_check_generic_call_arguments(call->func, arity, args_box);
+			zend_check_generic_call_arguments(call->func, arity, args_box, call->type_args);
 			if (!EG(exception)) {
-				zend_type_arg_table *t = zend_build_or_get_cached_type_args(call, args_box, cache_slot);
-				if (t) {
+				/* A frame that already carries a table with no turbofish at
+				 * this site (closure with captured bindings, monomorph by-name
+				 * dispatch) keeps it — rebuilding here would overwrite the
+				 * captured bindings with a defaults-only table. */
+				zend_type_arg_table *t = (args_box == NULL && call->type_args)
+					? call->type_args
+					: zend_build_or_get_cached_type_args(call, args_box, cache_slot);
+				if (t && t != call->type_args) {
 					if (call->type_args) {
 						zend_type_arg_table_destroy(call->type_args);
 					}
@@ -10256,7 +10262,10 @@ ZEND_VM_HANDLER(202, ZEND_CALLABLE_CONVERT, UNUSED, UNUSED, NUM|CACHE_SLOT)
 	USE_OPLINE
 	zend_execute_data *call = EX(call);
 
-	if (opline->extended_value != (uint32_t)-1) {
+	/* A frame carrying type-argument bindings (turbofish first-class
+	 * callable) must not share the per-func closure cache: two sites over
+	 * the same function with different type arguments would collide. */
+	if (opline->extended_value != (uint32_t)-1 && EXPECTED(call->type_args == NULL)) {
 		zend_object *closure = CACHED_PTR(opline->extended_value);
 		if (closure) {
 			ZVAL_OBJ_COPY(EX_VAR(opline->result.var), closure);

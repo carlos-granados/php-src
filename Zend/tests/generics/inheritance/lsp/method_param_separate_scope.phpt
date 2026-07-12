@@ -13,7 +13,7 @@ class IntContainer implements Container<int> {
 }
 
 echo (new IntContainer)->get(), "\n";
-echo (new IntContainer)->map(fn($x) => "v=$x"), "\n";
+echo (new IntContainer)->map::<string>(fn($x) => "v=$x"), "\n";
 ?>
 --EXPECT--
 5

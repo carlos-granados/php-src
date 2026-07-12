@@ -211,6 +211,32 @@ When validation passes, the handler installs the bindings: for calls,
 ``call->type_args``; for instantiation, the canonical monomorph is synthesised (or fetched from
 the class table) and ``object_init_ex`` runs against it.
 
+Binding resolution (no inference)
+---------------------------------
+
+A type-parameter slot is filled by exactly two sources, in precedence order: an explicit
+turbofish argument at the call site, then the parameter's declared default (``<T = mixed>``).
+There is **no value-directed inference** — a binding never depends on the runtime value, class,
+or zval type of an argument, so what a call site means is decided entirely by what is written at
+the call site and in the callee's signature. A declared *bound* (``<T : Animal>``) constrains
+explicit bindings but is never itself an implicit call-site binding.
+
+A call that leaves a non-defaulted slot unset is rejected. Detection is layered:
+
+-  Compile time: when the callee is statically known, generic, and has a non-defaulted type
+   parameter, a call (or first-class callable creation) without turbofish raises
+   ``E_COMPILE_ERROR``.
+-  Runtime: dynamically dispatched calls throw ``ArgumentCountError`` from
+   ``zend_check_generic_call_arguments`` before the callee body runs. A missing slot is forgiven
+   only when the frame already carries a validated binding for it — a closure created by a
+   turbofish first-class callable installs its captured table onto every invocation frame, and a
+   monomorph reached by name carries its own table.
+
+First-class callables bind at creation: ``id::<int>(...)`` runs the same VERIFY against the
+pending frame, and ``ZEND_CALLABLE_CONVERT`` captures the resolved table into the closure
+(``zend_closure_capture_type_args``), bypassing the per-func closure cache so sites with
+different type arguments never share a closure.
+
 Bare ``T``-ref resolution
 -------------------------
 

@@ -1012,6 +1012,30 @@ cleanup_args:
 	if (func->type == ZEND_USER_FUNCTION) {
 		uint32_t orig_jit_trace_num = EG(jit_trace_num);
 
+		/* C-dispatched calls (call_user_func, usort, array_map, etc.) don't go
+		 * through VERIFY_GENERIC_ARGUMENTS either, which is where generic
+		 * arity is normally enforced and declared defaults are installed. A C
+		 * dispatch can never supply turbofish, so a generic callee with
+		 * non-defaulted type parameters — and no captured bindings already on
+		 * the frame — must fail with the same ArgumentCountError a dynamic
+		 * VM call raises; otherwise install the defaults-built table. */
+		if (UNEXPECTED(func->op_array.generic_parameters != NULL)
+				&& call->type_args == NULL) {
+			zend_check_generic_call_arguments(func, 0, NULL, NULL);
+			if (EXPECTED(!EG(exception))) {
+				call->type_args = zend_build_generic_call_type_args(call, NULL);
+			} else {
+				zend_vm_stack_free_args(call);
+				if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+					OBJ_RELEASE(Z_OBJ(call->This));
+				}
+				zend_vm_stack_free_call_frame(call);
+				EG(fake_scope) = orig_fake_scope;
+				zend_release_fcall_info_cache(fci_cache);
+				return SUCCESS;
+			}
+		}
+
 		/* C-dispatched calls (usort, array_map, Closure::call, etc.) don't go
 		 * through DO_FCALL, so the closure-side reified arg check that lives
 		 * there is bypassed. Run it here for closures whose captured T-table
@@ -1753,8 +1777,8 @@ static ZEND_COLD void report_class_fetch_error(const zend_string *class_name, ui
 /* Resolve a function/method-level generic type parameter at runtime by reading
  * the current frame's T-table. Falls back to the parameter's declared bound when
  * no concrete binding was supplied (e.g. the function was called without
- * turbofish and inference produced nothing). Throws when neither a binding nor
- * a usable class bound is available. */
+ * turbofish and the parameter has no default). Throws when neither a binding
+ * nor a usable class bound is available. */
 ZEND_API zend_class_entry *zend_resolve_generic_type_param(uint32_t param_index, uint32_t fetch_type)
 {
 	zend_execute_data *ex = EG(current_execute_data);

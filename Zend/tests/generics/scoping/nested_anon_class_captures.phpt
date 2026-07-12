@@ -11,7 +11,7 @@ function makeAnimalBox<T : Animal>(T $x): object {
     };
 }
 class Dog implements Animal {}
-$obj = makeAnimalBox(new Dog);
+$obj = makeAnimalBox::<Dog>(new Dog);
 $r = new ReflectionClass($obj);
 echo $r->getProperty('val')->getType()->getName(), "\n";
 echo $r->getMethod('get')->getReturnType()->getName(), "\n";

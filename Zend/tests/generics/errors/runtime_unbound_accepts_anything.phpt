@@ -1,13 +1,13 @@
 --TEST--
-Errors: runtime accepts anything for unbounded T (mixed)
+Errors: an explicit mixed binding accepts any value
 --FILE--
 <?php
 function f<T>(T $x): T { return $x; }
 
-var_dump(f(42));
-var_dump(f("foo"));
-var_dump(f(null));
-var_dump(f(new stdClass));
+var_dump(f::<mixed>(42));
+var_dump(f::<mixed>("foo"));
+var_dump(f::<mixed>(null));
+var_dump(f::<mixed>(new stdClass));
 echo "no errors\n";
 ?>
 --EXPECT--

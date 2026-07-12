@@ -5,7 +5,7 @@ Scoping: nested closure has its own ReflectionFunction view
 function f<T : object>(): Closure {
     return function (T $y): T { return $y; };
 }
-$cl = f();
+$cl = f::<stdClass>();
 $r = new ReflectionFunction($cl);
 echo $r->getReturnType()->__toString(), "\n";
 ?>

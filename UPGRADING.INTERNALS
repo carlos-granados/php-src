@@ -220,9 +220,16 @@ PHP 8.6 INTERNALS UPGRADE NOTES
           and the called scope -> lexical scope chain for class-level
           T (the binding lives on the monomorph that is the direct
           child of the lexical scope on cur->generic_type_args).
-      zend_generic_parameter_list gained an `inferable_mask` (bit i
-      set when some value-parameter's reified type is exactly param i
-      at a top-level position) so inference can short-circuit.
+      There is no value-directed inference: a type-parameter slot is
+      filled only by an explicit turbofish argument or the parameter's
+      declared default. A call that leaves a non-defaulted slot unset
+      is rejected — at compile time (E_COMPILE_ERROR) when the callee
+      is statically known, otherwise at runtime with an
+      ArgumentCountError from zend_check_generic_call_arguments(),
+      which forgives a missing slot only when the frame already
+      carries a validated binding for it (closure captured table from
+      a turbofish first-class callable, or monomorph by-name
+      dispatch).
     . Three new class-fetch sub-types on the class-fetch enum,
       packed into op.num via zend_pack_*_fetch helpers:
         - ZEND_FETCH_CLASS_TYPE_PARAM        (7) — function/method-

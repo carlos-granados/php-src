@@ -7,7 +7,7 @@ function f<T>($x): bool {
     return $x instanceof T;
 }
 $called = false;
-$result = f(new stdClass);
+$result = f::<DateTime>(new stdClass);
 var_dump($result);
 ?>
 --EXPECT--

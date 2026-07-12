@@ -1,5 +1,5 @@
 --TEST--
-Reification: T is inferred from an argument whose declared type is exactly T; the substituted parameter type is enforced when turbofish disagrees with the value
+Reification: T::class reflects the explicit turbofish binding; the substituted parameter type is enforced
 --FILE--
 <?php
 class Foo { public string $kind = "foo"; }
@@ -9,8 +9,8 @@ function kind<T : object>(T $x): string {
     return T::class;
 }
 
-echo kind(new Foo()), "\n";
-echo kind(new Bar()), "\n";
+echo kind::<Foo>(new Foo()), "\n";
+echo kind::<Bar>(new Bar()), "\n";
 
 try {
     kind::<Foo>(new Bar());

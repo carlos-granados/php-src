@@ -1,14 +1,14 @@
 --TEST--
-catch (T $e) silently does not match when T has no usable binding
+catch (T $e) silently does not match when T's binding is not a class
 --FILE--
 <?php
 function f<T>(): void {
-    // T has no class bound and no caller-supplied binding. catch (T $e)
+    // T is bound to a scalar (int), which is not a class. catch (T $e)
     // is therefore "catch nothing"; the thrown exception propagates out.
     try { throw new Exception("boom"); } catch (T $e) { echo "caught\n"; }
 }
 try {
-    f();
+    f::<int>();
 } catch (Throwable $e) {
     echo "outer: ", $e->getMessage(), "\n";
 }

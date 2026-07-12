@@ -15,19 +15,19 @@ class Holder<T = mixed> {
     public function get(): ?T { return $this->value; }
 }
 
-var_dump(nullableUnbounded(42));
-var_dump(nullableUnbounded(null));
-var_dump(nullableUnbounded("hi"));
-var_dump(nullableBounded(7));
-var_dump(nullableBounded(null));
-var_dump(unionNullUnbounded(null));
-var_dump(unionNullUnbounded("x"));
-var_dump(unionMultiUnbounded(1));
-var_dump(unionMultiUnbounded(true));
-var_dump(unionMultiUnbounded(new stdClass));
-var_dump(unionNullBounded(null));
-var_dump(unionNullBounded(7));
-var_dump(unionMultiBounded(1));
+var_dump(nullableUnbounded::<int>(42));
+var_dump(nullableUnbounded::<string>(null));
+var_dump(nullableUnbounded::<string>("hi"));
+var_dump(nullableBounded::<int>(7));
+var_dump(nullableBounded::<int>(null));
+var_dump(unionNullUnbounded::<string>(null));
+var_dump(unionNullUnbounded::<string>("x"));
+var_dump(unionMultiUnbounded::<int>(1));
+var_dump(unionMultiUnbounded::<bool>(true));
+var_dump(unionMultiUnbounded::<stdClass>(new stdClass));
+var_dump(unionNullBounded::<int>(null));
+var_dump(unionNullBounded::<int>(7));
+var_dump(unionMultiBounded::<Stringable>(1));
 
 echo "nullableUnbounded: ",  (new ReflectionFunction('nullableUnbounded'))->getReturnType(),  "\n";
 echo "nullableBounded: ",    (new ReflectionFunction('nullableBounded'))->getReturnType(),    "\n";

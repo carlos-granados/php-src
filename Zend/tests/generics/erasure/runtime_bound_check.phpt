@@ -7,10 +7,10 @@ class Dog extends Animal {}
 
 function f<T : Animal>(T $x): T { return $x; }
 
-echo get_class(f(new Dog)), "\n";
+echo get_class(f::<Dog>(new Dog)), "\n";
 
 try {
-    f("not an animal");
+    f::<string>("not an animal");
     echo "FAIL\n";
 } catch (TypeError $e) {
     echo "caught\n";

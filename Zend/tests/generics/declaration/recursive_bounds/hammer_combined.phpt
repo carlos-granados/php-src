@@ -25,7 +25,7 @@ class Container<O> {
 
 $p = new IntStrPair(new IntBox(), new StrBox());
 $c = new Container::<int>();
-[$first, $second] = $c->swap($p);
+[$first, $second] = $c->swap::<IntBox, StrBox>($p);
 
 var_dump($first instanceof StrBox, $second instanceof IntBox);
 ?>

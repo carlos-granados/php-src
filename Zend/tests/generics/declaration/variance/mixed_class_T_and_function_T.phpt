@@ -6,7 +6,7 @@ class C<out T = mixed> {
     public function map<in A, out B>(A $a): B { return null; }
 }
 
-(new C)->map(42);
+(new C)->map::<int, mixed>(42);
 echo "ok\n";
 ?>
 --EXPECT--

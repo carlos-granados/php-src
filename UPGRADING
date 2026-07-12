@@ -200,11 +200,22 @@ PHP 8.6 UPGRADE NOTES
 
         function id<T>(T $x): T { return $x; }
 
-    Call sites accept turbofish type arguments (`Box::<int>::new()`,
+    Call sites supply type arguments with turbofish (`Box::<int>::new()`,
     `id::<int>(7)`); use sites accept type arguments on named types
     (`Box<int>`, `array<int, string>`, `iterable<T>`, `self<T>`,
     `static<T>`, `parent<T>`). Recursive bounds (`T : Comparable<T>`)
     are supported. Anonymous classes cannot declare type parameters.
+
+    Turbofish is required: a type-parameter slot is filled only by an
+    explicit turbofish argument or the parameter's declared default
+    (`T = int`). Type arguments are never inferred from argument
+    values, and a bound is not an implicit call-site binding. Calling
+    a generic function (or creating a first-class callable for one)
+    without supplying its non-defaulted type arguments is a compile
+    error when the callee is statically known, and an
+    ArgumentCountError at runtime otherwise. A first-class callable
+    created with turbofish (`id::<int>(...)`) captures its bindings
+    into the closure.
 
     Generics are reified along two axes. Class-like generics are
     monomorphised: each distinct argument tuple (`Box<int>`,

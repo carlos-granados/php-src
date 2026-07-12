@@ -148,7 +148,6 @@ typedef struct _zend_generic_parameter {
 
 typedef struct _zend_generic_parameter_list {
 	uint32_t count;
-	uint64_t inferable_mask;        /* bit i set when some value-parameter's pre-erasure type is exactly param i */
 	zend_generic_parameter parameters[1];
 } zend_generic_parameter_list;
 
@@ -215,7 +214,7 @@ ZEND_API zend_generic_variance zend_parse_generic_variance(zend_ast *keyword_ast
 ZEND_API void zend_check_generic_param_list_size(zend_ast *list_ast);
 ZEND_API void zend_check_generic_arg_list_size(zend_ast *list_ast);
 
-ZEND_API void zend_check_generic_call_arguments(const zend_function *fbc, uint32_t arity, const zend_type *args_box);
+ZEND_API void zend_check_generic_call_arguments(const zend_function *fbc, uint32_t arity, const zend_type *args_box, const struct _zend_type_arg_table *pre_bound);
 ZEND_API void zend_check_generic_new_arguments(const zend_class_entry *ce, uint32_t arity, const zend_type *args_box);
 ZEND_API void zend_apply_generic_new(zval *new_obj, zend_execute_data *call, const zend_type *args_box, uint32_t arity, void **cache_slot, bool do_checks);
 ZEND_API const zend_type *zend_generic_get_turbofish_args(const zend_op_array *caller_op_array, uint32_t args_id);
@@ -230,15 +229,15 @@ ZEND_API struct _zend_turbofish_args_entry *zend_generic_get_turbofish_call_entr
  *     side table) or a parent frame's entry. Frames nest, so the source
  *     is guaranteed to outlive the entry.
  *   - `owned_type`: a zend_type owned by this entry. Used when no
- *     pre-existing zend_type can be borrowed — currently only for
- *     value-directed inference, where the inferred class-name zend_type
- *     is synthesised fresh. Released by zend_type_arg_table_destroy.
+ *     pre-existing zend_type can be borrowed — e.g. a materialised copy of
+ *     a borrowed binding, or a substituted type synthesised for a monomorph
+ *     table. Released by zend_type_arg_table_destroy.
  * Reads prefer `type_ref` when non-NULL, otherwise `owned_type`. When both
  * are unset the parameter is unbound — consumers fall back to the
  * parameter's declared bound.
  *
- * Lifetime: allocated by VERIFY_GENERIC_ARGUMENTS for a function call (or
- * inferred at RECV time), freed when the frame unwinds. `generation` is a
+ * Lifetime: allocated by VERIFY_GENERIC_ARGUMENTS for a function call,
+ * freed when the frame unwinds. `generation` is a
  * monotonically-increasing nonce assigned at allocation time so cache
  * slots that key off the table pointer can detect ABA reuse. */
 typedef struct _zend_type_arg_entry {

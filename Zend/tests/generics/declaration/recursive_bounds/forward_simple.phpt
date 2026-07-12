@@ -4,7 +4,7 @@ Recursive bounds: simple forward reference in bound
 <?php
 class Foo {}
 function f<U: T, T: Foo>(U $x): T { return $x; }
-var_dump(f(new Foo()));
+var_dump(f::<Foo, Foo>(new Foo()));
 ?>
 --EXPECTF--
 object(Foo)#%d (0) {

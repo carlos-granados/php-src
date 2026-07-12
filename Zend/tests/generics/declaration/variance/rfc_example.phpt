@@ -35,7 +35,7 @@ function identity<T>(T $value): T {
 $greeting = new Box::<string>("hello, world");
 $paired   = $greeting->zip::<int>(42);
 $swapped  = $paired->value->swap();
-$result   = identity($swapped);
+$result   = identity::<Pair<mixed, mixed>>($swapped);
 
 var_dump($result->left);
 var_dump($result->right);

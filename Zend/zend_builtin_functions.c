@@ -373,8 +373,8 @@ ZEND_FUNCTION(func_get_args)
 
 /* {{{ Get an array mapping generic type-parameter names to their resolved
  * class names for the currently-executed generic function call. Unbound slots
- * (parameter has no turbofish, no default, and no inferable position) yield
- * NULL — the caller can detect them and fall back to the parameter's bound. */
+ * (parameter has no turbofish arg and no default) yield NULL — the caller can
+ * detect them and fall back to the parameter's bound. */
 ZEND_FUNCTION(func_get_type_args)
 {
 	zend_execute_data *ex = EX(prev_execute_data);

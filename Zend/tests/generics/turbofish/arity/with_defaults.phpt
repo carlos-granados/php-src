@@ -9,8 +9,9 @@ var_dump(f::<int>(1));
 var_dump(f::<int, string>(2));
 var_dump(f::<int, string, float>(3));
 
-// arity 0 (i.e., no turbofish) is also valid
-var_dump(f(4));
+// arity 0 (no turbofish) is valid only when every parameter has a default
+function g<A = int, B = mixed>($x) { return $x; }
+var_dump(g(4));
 
 // arity 4 exceeds total
 try {

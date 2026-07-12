@@ -5,7 +5,7 @@ Scoping: nested arrow function captures enclosing type parameter
 function f<T : int>(): Closure {
     return fn(T $y): T => $y;
 }
-$cl = f();
+$cl = f::<int>();
 $r = new ReflectionFunction($cl);
 echo $r->getParameters()[0]->getType()->getName(), "\n";
 echo $r->getReturnType()->getName(), "\n";
