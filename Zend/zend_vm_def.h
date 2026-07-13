@@ -4417,11 +4417,23 @@ ZEND_VM_HOT_HANDLER(60, ZEND_DO_FCALL, ANY, ANY, SPEC(RETVAL,OBSERVER))
 					zend_string_release_ex(call->func->common.function_name, 0);
 					zend_free_trampoline(call->func);
 				}
+				/* The frame holds a reference on the closure object (this
+				 * check only fires for ZEND_ACC_CLOSURE callees); release it
+				 * here as the normal fcall error paths do, or the closure
+				 * leaks whenever a captured-T argument check fails. */
+				if (ZEND_CALL_INFO(call) & ZEND_CALL_CLOSURE) {
+					OBJ_RELEASE(ZEND_CLOSURE_OBJECT(call->func));
+				}
 				if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
 					OBJ_RELEASE(Z_OBJ(call->This));
 				}
 				EX(call) = call->prev_execute_data;
 				zend_vm_stack_free_call_frame(call);
+				/* The check threw before the call ran, so this DO_FCALL's
+				 * result slot never received a return value and still holds a
+				 * stale temporary. Mark it UNDEF as the normal fcall error
+				 * paths do, or the exception handler frees that garbage. */
+				UNDEF_RESULT();
 				HANDLE_EXCEPTION();
 			}
 		}
@@ -4791,6 +4803,21 @@ ZEND_VM_HANDLER(139, ZEND_GENERATOR_CREATE, ANY, ANY)
 		generator->func = gen_execute_data->func;
 		generator->execute_data = gen_execute_data;
 		generator->frozen_call_stack = NULL;
+
+		/* The frame's type-arg table may be a persisted table owned by the
+		 * calling op_array's per-call-site inline cache (built by the
+		 * monomorph INSTALL path). A generator can outlive that op_array's
+		 * teardown, so a borrowed pointer into cache memory would dangle when
+		 * destroy_op_array frees the cached table first at shutdown. Give the
+		 * generator an independent, self-contained copy it owns and frees at
+		 * close, mirroring how closures capture their bindings. A non-persisted
+		 * table is already frame-owned and transfers with the frame as-is. */
+		if (gen_execute_data->type_args && gen_execute_data->type_args->persisted) {
+			zend_type_arg_table *owned =
+				zend_type_arg_table_capture_clone(gen_execute_data->type_args);
+			owned->persisted = false;
+			gen_execute_data->type_args = owned;
+		}
 		generator->execute_fake.opline = NULL;
 		generator->execute_fake.func = NULL;
 		generator->execute_fake.prev_execute_data = NULL;
@@ -9270,22 +9297,18 @@ ZEND_VM_HANDLER(212, ZEND_VERIFY_GENERIC_ARGUMENTS, TMP|UNUSED, UNUSED)
 
 generic_verify_check_exception:
 	if (UNEXPECTED(EG(exception))) {
-		/* Args have already been pushed by the SEND opcodes preceding the
-		 * VERIFY emission for call kind; release them so refcounted values
-		 * don't leak. */
-		zend_vm_stack_free_args(call);
-
-		if (call->func->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE) {
-			zend_string_release_ex(call->func->common.function_name, 0);
-			zend_free_trampoline(call->func);
-		}
-
-		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-			OBJ_RELEASE(Z_OBJ(call->This));
-		}
-
-		EX(call) = call->prev_execute_data;
-		zend_vm_stack_free_call_frame(call);
+		/* Leave the pending call frame in EX(call) and let the standard
+		 * exception unwinder (cleanup_unfinished_calls, reached via
+		 * HANDLE_EXCEPTION) release it. VERIFY_GENERIC_ARGUMENTS sits inside a
+		 * still-open call region — before DO_FCALL, and for NEW even before the
+		 * constructor's SEND opcodes — so tearing the frame down by hand here
+		 * is wrong two ways: for NEW it would walk ZEND_NEW's reserved-but-
+		 * uninitialised argument slots, and popping the frame corrupts the
+		 * unwinder's backward argument scan for an *enclosing* call (it then
+		 * misreads this call's SEND count as the outer call's, freeing
+		 * uninitialised slots). The unwinder derives the pushed-argument count
+		 * from the opcode stream (0 for NEW, the sent count for CALL) and
+		 * already releases $this, the closure object, and any trampoline. */
 		HANDLE_EXCEPTION();
 	}
 

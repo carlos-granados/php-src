@@ -697,6 +697,14 @@ ZEND_API void destroy_zend_class(zval *zv)
 						}
 					}
 				} else if (prop_info->flags & ZEND_ACC_GENERIC_CLONE) {
+					/* A cross-class generic clone (e.g. Holder<T>'s `T $thing`
+					 * cloned into the Holder<Item> monomorph) owns a substituted
+					 * `type` (copy_ctor'd in do_inherit_property) and its own
+					 * reference on the borrowed `name`. Release both here; the
+					 * prop_info struct itself is arena-allocated and freed in
+					 * bulk. */
+					zend_type_release(prop_info->type, /* persistent */ false);
+					zend_string_release_ex(prop_info->name, 0);
 					if (prop_info->hooks) {
 						for (uint32_t i = 0; i < ZEND_PROPERTY_HOOK_COUNT; i++) {
 							if (prop_info->hooks[i]) {
@@ -923,6 +931,37 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 
 	if (op_array->function_name) {
 		zend_string_release_ex(op_array->function_name, 0);
+	}
+
+	/* A generic method clone shares the parent's op-array body (refcount) but
+	 * owns a private, arena-allocated arg_info block whose names/types were
+	 * addref'd / copy_ctor'd during substitution. The shared body keeps the
+	 * refcount above zero here, so the normal arg_info release below is never
+	 * reached; release the refcounted contents now (the block itself lives in
+	 * the arena and is reclaimed with it) and detach the pointer so neither
+	 * this call's later cleanup nor the last body-refcount holder touches it. */
+	if ((op_array->fn_flags2 & ZEND_ACC2_GENERIC_ARGINFO_CLONE)
+			&& !(op_array->fn_flags & ZEND_ACC_IMMUTABLE)
+			&& op_array->arg_info) {
+		uint32_t num_args = op_array->num_args;
+		zend_arg_info *arg_info = op_array->arg_info;
+		if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+			arg_info--;
+			num_args++;
+		}
+		if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+			num_args++;
+		}
+		for (uint32_t i = 0; i < num_args; i++) {
+			if (arg_info[i].name) {
+				zend_string_release_ex(arg_info[i].name, 0);
+			}
+			if (arg_info[i].doc_comment) {
+				zend_string_release_ex(arg_info[i].doc_comment, 0);
+			}
+			zend_type_release(arg_info[i].type, /* persistent */ false);
+		}
+		op_array->arg_info = NULL;
 	}
 
 	if (!op_array->refcount || --(*op_array->refcount) > 0) {

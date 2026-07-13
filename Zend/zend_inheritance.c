@@ -2150,8 +2150,13 @@ static zend_function *zend_maybe_substitute_inherited_method(
 	/* The clone shares the parent's opcode stream but holds tightened arg_info
 	 * from generic substitution. Mark it like a trait-method clone so opcache
 	 * persistence and the RECV handler can detect that the inline RECV type
-	 * mask may be looser than the live arg_info. */
+	 * mask may be looser than the live arg_info. The extra ARGINFO_CLONE flag
+	 * tells teardown that this private arg_info block (arena-allocated, with
+	 * addref'd names and copy_ctor'd types) must have its contents released
+	 * even though the shared body's refcount keeps destroy_op_array from
+	 * reaching its normal arg_info release. */
 	clone->common.fn_flags |= ZEND_ACC_TRAIT_CLONE;
+	clone->common.fn_flags2 |= ZEND_ACC2_GENERIC_ARGINFO_CLONE;
 
 	function_add_ref(clone);
 	return clone;

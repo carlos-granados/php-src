@@ -648,6 +648,12 @@ typedef struct _zend_oparray_context {
 /*                                                        |     |     |     */
 /* synthesized monomorph carrying concrete type-args      |     |     |     */
 #define ZEND_ACC2_MONOMORPH_TYPE_ARGS    (1 << 2)  /*     |  X  |     |     */
+/*                                                        |     |     |     */
+/* generic method clone owns a private (arena-allocated)  |     |     |     */
+/* substituted arg_info over a shared op-array body: its  |     |     |     */
+/* refcounted arg_info contents must be released even when|     |     |     */
+/* the shared body's refcount has not reached zero        |     |     |     */
+#define ZEND_ACC2_GENERIC_ARGINFO_CLONE  (1 << 3)  /*     |  X  |     |     */
 
 #define ZEND_ACC_PPP_MASK  (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE)
 #define ZEND_ACC_PPP_SET_MASK  (ZEND_ACC_PUBLIC_SET | ZEND_ACC_PROTECTED_SET | ZEND_ACC_PRIVATE_SET)

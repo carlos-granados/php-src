@@ -546,18 +546,26 @@ static zend_generic_parameter *zend_generic_lookup(zend_string *name) /* {{{ */
 ZEND_API zend_generic_variance zend_parse_generic_variance(zend_ast *keyword_ast) /* {{{ */
 {
 	zend_string *keyword = zend_ast_get_str(keyword_ast);
+	zend_generic_variance variance;
 	if (zend_string_equals_literal_ci(keyword, "out")) {
 		/* `out T`: T may only appear in output (covariant) positions. */
-		return ZEND_GENERIC_VARIANCE_COVARIANT;
-	}
-	if (zend_string_equals_literal_ci(keyword, "in")) {
+		variance = ZEND_GENERIC_VARIANCE_COVARIANT;
+	} else if (zend_string_equals_literal_ci(keyword, "in")) {
 		/* `in T`: T may only appear in input (contravariant) positions. */
-		return ZEND_GENERIC_VARIANCE_CONTRAVARIANT;
+		variance = ZEND_GENERIC_VARIANCE_CONTRAVARIANT;
+	} else {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Unexpected '%s' before generic type parameter name; "
+			"expected 'in' or 'out' variance keyword",
+			ZSTR_VAL(keyword));
 	}
-	zend_error_noreturn(E_COMPILE_ERROR,
-		"Unexpected '%s' before generic type parameter name; "
-		"expected 'in' or 'out' variance keyword",
-		ZSTR_VAL(keyword));
+	/* The grammar action drops the keyword node without linking it into the
+	 * AST, so nothing ever releases its zval — the arena frees the node but
+	 * not the string. Release it here and neutralise the slot. */
+	zval *keyword_zv = zend_ast_get_zval(keyword_ast);
+	zval_ptr_dtor_nogc(keyword_zv);
+	ZVAL_NULL(keyword_zv);
+	return variance;
 }
 /* }}} */
 
@@ -825,6 +833,15 @@ ZEND_API zend_function *zend_get_or_synthesize_call_monomorph(
 {
 	zend_function *base = call->func;
 
+	/* Never swap call->func for a closure: the call frame's closure-object
+	 * release (ZEND_CALL_CLOSURE) reads ZEND_CLOSURE_OBJECT(call->func), so
+	 * replacing func with a monomorph clone would release the wrong object
+	 * and underflow the closure's refcount. Closures resolve their bindings
+	 * through the per-frame type-arg table instead. */
+	if (base->common.fn_flags & ZEND_ACC_CLOSURE) {
+		return NULL;
+	}
+
 	if (cache_slot
 			&& (uintptr_t) cache_slot[1] == ZEND_TURBOFISH_CACHE_KEY_MONOMORPH
 			&& cache_slot[3] == (void *) base) {
@@ -880,6 +897,12 @@ ZEND_API zend_function *zend_try_monomorph_resolved_call(
 		zend_type_arg_table **out_type_args)
 {
 	zend_function *base = call->func;
+
+	/* See zend_get_or_synthesize_call_monomorph: a closure's call->func must
+	 * not be swapped, or the frame's closure-object release underflows. */
+	if (base->common.fn_flags & ZEND_ACC_CLOSURE) {
+		return NULL;
+	}
 
 	if (cache_slot
 			&& (uintptr_t) cache_slot[1] == ZEND_TURBOFISH_CACHE_KEY_MONOMORPH
