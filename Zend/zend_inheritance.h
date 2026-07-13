@@ -53,6 +53,9 @@ ZEND_API bool zend_get_inheritance_binding_full(
 		uint32_t out_capacity,
 		uint32_t *out_arity);
 
+ZEND_API bool zend_mono_transitive_subtype(
+		const zend_class_entry *sub, const zend_class_entry *super);
+
 static zend_always_inline void zend_do_inheritance(zend_class_entry *ce, zend_class_entry *parent_ce) {
 	zend_do_inheritance_ex(ce, parent_ce, 0);
 }

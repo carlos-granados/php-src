@@ -22,6 +22,7 @@
 #include "zend.h"
 #include "zend_operators.h"
 #include "zend_variables.h"
+#include "zend_inheritance.h"
 #include "zend_globals.h"
 #include "zend_list.h"
 #include "zend_API.h"
@@ -2633,11 +2634,20 @@ ZEND_API bool ZEND_FASTCALL instanceof_function_slow(const zend_class_entry *ins
 		const zend_class_entry *target_base = ce->generic_type_args ? ce->parent : NULL;
 		const zend_class_entry *walker = instance_ce;
 		while (1) {
-			if (target_base
-					&& walker->parent == target_base
-					&& walker->generic_type_args
-					&& zend_mono_subtype_under_variance(target_base, walker, ce)) {
-				return 1;
+			if (target_base && walker->generic_type_args) {
+				if (walker->parent == target_base) {
+					/* Direct sibling monomorph of the same base template. */
+					if (zend_mono_subtype_under_variance(target_base, walker, ce)) {
+						return 1;
+					}
+				} else if (zend_mono_transitive_subtype(walker, ce)) {
+					/* A monomorph whose template descends from the target's
+					 * template (e.g. Derived<int> vs Base<int> when
+					 * `Derived<T> extends Base<T>`): the substituted parent
+					 * monomorph isn't in the linear chain, so check the
+					 * composed binding under variance. */
+					return 1;
+				}
 			}
 			walker = walker->parent;
 			if (walker == ce) {

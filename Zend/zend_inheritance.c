@@ -1363,6 +1363,100 @@ static bool zend_get_inheritance_binding_full_cached(
 	return result;
 }
 
+/* Reified `instanceof` for the transitive-parent case. Answers: is the
+ * monomorph `sub` (e.g. Derived<int>, whose template is sub->parent) a subtype
+ * of the monomorph `super` (e.g. Base<int>, template super->parent) when
+ * super's template is a *transitive* generic ancestor of sub's template?
+ *
+ * A monomorph extends its own template, not the substituted parent monomorph,
+ * so `Base<int>` never appears in Derived<int>'s linear parent chain — the
+ * plain instanceof walk and the direct-sibling variance check both miss it.
+ * Here we compose the binding from sub's template to super's template, resolve
+ * each of super's parameters to sub's actual argument (by canonical name,
+ * respecting super's variance markers), and compare against super's arguments.
+ * The direct-sibling case (same template) is handled by
+ * zend_mono_subtype_under_variance in the caller; this returns false for it.
+ *
+ * The binding types filled by zend_get_inheritance_binding_full are borrowed
+ * (as every other caller treats them); the only owned allocation here is the
+ * canonical name for a concrete binding leaf, which is released before return. */
+ZEND_API bool zend_mono_transitive_subtype(
+		const zend_class_entry *sub, const zend_class_entry *super)
+{
+	if (!sub->generic_type_args || !super->generic_type_args) {
+		return false;
+	}
+	zend_class_entry *sub_tmpl = sub->parent;
+	zend_class_entry *super_tmpl = super->parent;
+	if (!sub_tmpl || !super_tmpl || sub_tmpl == super_tmpl
+			|| !super_tmpl->generic_parameters) {
+		return false;
+	}
+	uint32_t super_count = super_tmpl->generic_parameters->count;
+	if (super->generic_type_args->count != super_count) {
+		return false;
+	}
+
+	/* Compose sub_tmpl -> super_tmpl's binding (in terms of sub_tmpl's params).
+	 * Fails when super_tmpl is not a generic ancestor of sub_tmpl. */
+	zend_type binding[ZEND_GENERIC_MAX_PARAMS];
+	uint32_t binding_arity = 0;
+	if (!zend_get_inheritance_binding_full(
+			sub_tmpl, super_tmpl, binding, ZEND_GENERIC_MAX_PARAMS, &binding_arity)
+			|| binding_arity != super_count) {
+		return false;
+	}
+
+	for (uint32_t j = 0; j < super_count; j++) {
+		zend_string *sub_name;
+		bool owned = false;
+		if (ZEND_TYPE_HAS_TYPE_PARAMETER(binding[j])) {
+			const zend_type_parameter_ref *ref = ZEND_TYPE_TYPE_PARAMETER(binding[j]);
+			if (ref->origin != ZEND_GENERIC_ORIGIN_CLASS_LIKE
+					|| ref->index >= sub->generic_type_args->count) {
+				return false;
+			}
+			sub_name = sub->generic_type_args->entries[ref->index].name;
+		} else {
+			sub_name = zend_type_arg_canonical_name(binding[j]);
+			owned = true;
+		}
+		zend_string *super_name = super->generic_type_args->entries[j].name;
+
+		bool ok;
+		if (!sub_name || !super_name) {
+			ok = false;
+		} else if (zend_string_equals(sub_name, super_name)) {
+			ok = true;
+		} else {
+			zend_generic_variance variance =
+				super_tmpl->generic_parameters->parameters[j].variance;
+			if (variance == ZEND_GENERIC_VARIANCE_INVARIANT) {
+				ok = false;
+			} else {
+				zend_class_entry *sub_ce = zend_lookup_class_ex(sub_name, NULL,
+					ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+				zend_class_entry *super_ce = zend_lookup_class_ex(super_name, NULL,
+					ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+				if (!sub_ce || !super_ce) {
+					ok = false;
+				} else if (variance == ZEND_GENERIC_VARIANCE_COVARIANT) {
+					ok = instanceof_function(sub_ce, super_ce);
+				} else { /* CONTRAVARIANT */
+					ok = instanceof_function(super_ce, sub_ce);
+				}
+			}
+		}
+		if (owned) {
+			zend_string_release(sub_name);
+		}
+		if (!ok) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /* Fills out_args with target_ce's parameter defaults if every parameter
  * has one. */
 static bool zend_get_target_default_args(

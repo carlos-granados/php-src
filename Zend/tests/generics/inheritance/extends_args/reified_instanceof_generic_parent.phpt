@@ -1,15 +1,5 @@
 --TEST--
-Extends-with-args: reified `instanceof Parent::<int>` through a forwarding generic parent (KNOWN GAP — interfaces reify transitively but parent classes do not yet)
---XFAIL--
-Transitive reified instanceof is inconsistent between interfaces and parent
-classes. For `class Derived<T> extends Base<T> implements Producer<T>`,
-`new Derived::<int>() instanceof Producer::<int>` is TRUE (the synthesis walks
-the ancestor chain and inserts substituted interface monomorphs into
-interfaces[]), but `... instanceof Base::<int>` is FALSE: a monomorph extends
-its template, so the substituted parent class Base<int> is never inserted into
-the linear parent chain. Fixing this needs the synthesis to make substituted
-parent-class monomorphs discoverable in the ancestry (an inheritance-model
-change), tracked separately.
+Extends-with-args: reified `instanceof Parent::<int>` reifies transitively through a forwarding generic parent, consistently with interfaces
 --FILE--
 <?php
 interface Producer<out T> { public function make(): T; }
