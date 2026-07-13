@@ -1,5 +1,5 @@
 --TEST--
-Monomorph: var_export emits the canonical class name (KNOWN LIMITATION: the output is not re-evaluable because `Name<...>` is not valid class-reference syntax)
+Monomorph: var_export emits a re-evaluable ('Name<...>')::__set_state(...) form that round-trips
 --FILE--
 <?php
 class Point<T> {
@@ -16,31 +16,36 @@ $p = new Point::<int>(3, 4);
 $code = var_export($p, true);
 echo $code, "\n";
 
-// KNOWN LIMITATION: unlike ordinary classes, the var_export output of a
-// monomorph is NOT round-trippable via eval() — the canonical name embeds
-// `<int>`, which the parser reads as comparison operators in class-name
-// position. This test locks in the current behavior so a future fix (e.g.
-// emitting turbofish-compatible reconstruction) is a deliberate change.
-try {
-    eval('return ' . $code . ';');
-    echo "eval: OK\n";
-} catch (ParseError $e) {
-    echo "eval: ParseError (not round-trippable)\n";
-}
+// The canonical monomorph name embeds `<int>`, which is not valid in a bare
+// class-reference position, so var_export wraps it as a parenthesised string
+// literal — a valid, re-evaluable class reference.
+$p2 = eval('return ' . $code . ';');
+var_dump($p2::class, $p2->x, $p2->y, $p2 instanceof Point::<int>);
 
-// __set_state IS reachable via a dynamic class-name string holding the
-// canonical monomorph name, which is how unserialize/var_export consumers
-// would reconstruct it in practice.
+// A plain (non-generic) class keeps the classic \Name::__set_state form.
+class Plain {
+    public $a = 1;
+    public static function __set_state(array $p): static { $o = new static(); $o->a = $p['a']; return $o; }
+}
+echo var_export(new Plain(), true), "\n";
+
+// __set_state is also reachable via a dynamic class-name string.
 $cls = 'Point<int>';
-$p2 = $cls::__set_state(['x' => 3, 'y' => 4]);
-var_dump($p2::class, $p2->x, $p2->y);
+$p3 = $cls::__set_state(['x' => 7, 'y' => 8]);
+var_dump($p3::class, $p3->x, $p3->y);
 ?>
 --EXPECTF--
-\Point<int>::__set_state(array(
+('Point<int>')::__set_state(array(
    'x' => 3,
    'y' => 4,
 ))
-eval: ParseError (not round-trippable)
 string(10) "Point<int>"
 int(3)
 int(4)
+bool(true)
+\Plain::__set_state(array(
+   'a' => 1,
+))
+string(10) "Point<int>"
+int(7)
+int(8)

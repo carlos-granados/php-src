@@ -620,6 +620,19 @@ again:
 			/* stdClass has no __set_state method, but can be casted to */
 			if (ce == zend_standard_class_def) {
 				smart_str_appendl(buf, "(object) array(\n", 16);
+			} else if (!is_enum && memchr(ZSTR_VAL(ce->name), '<', ZSTR_LEN(ce->name)) != NULL) {
+				/* A monomorph's canonical name (e.g. Box<int>) is not valid in
+				 * a class-reference position — `Box<int>::` parses as a chain of
+				 * comparison operators. Emit the name as a parenthesised string
+				 * literal, which IS a re-evaluable class reference:
+				 * ('Box<int>')::__set_state(array(...)). The parentheses around
+				 * the string are self-balanced, so the trailing "))" below still
+				 * closes __set_state(array( ... exactly as for a plain class. */
+				zend_string *escaped = php_addcslashes(ce->name, "'\\", 2);
+				smart_str_appendl(buf, "('", 2);
+				smart_str_append(buf, escaped);
+				smart_str_appendl(buf, "')::__set_state(array(\n", 23);
+				zend_string_free(escaped);
 			} else {
 				smart_str_appendc(buf, '\\');
 				smart_str_append(buf, ce->name);

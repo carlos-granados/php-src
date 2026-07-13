@@ -429,9 +429,11 @@ Documented gaps (``--XFAIL--`` tests, tracked for follow-up):
 
 Behaviours pinned as current-but-notable (regular passing tests, not gaps):
 
-- ``var_export`` of a monomorph emits ``\Box<int>::__set_state(...)`` which is not re-evaluable
-  (``Box<int>`` is not valid class-reference syntax); the dynamic form ``('Box<int>')::method()``
-  does work.
+- ``var_export`` of a monomorph emits the re-evaluable form
+  ``('Box<int>')::__set_state(...)`` — the canonical name is wrapped as a parenthesised string
+  literal because ``Box<int>::`` is not valid class-reference syntax. Plain classes keep the
+  classic ``\Name::__set_state(...)`` form. The monomorph's static methods are likewise reachable
+  via a dynamic class-name string, ``('Box<int>')::method()``.
 - ``never``/``void``/``null``/``mixed`` are accepted as type arguments — the engine treats a type
   argument as an opaque type name; semantic rejection is a static-analysis concern.
 - A monomorph method's ``debug_backtrace()``/exception-trace ``class`` is the *template* name

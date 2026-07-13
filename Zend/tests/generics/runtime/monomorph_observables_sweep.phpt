@@ -65,7 +65,7 @@ object(Box<int>)#%d (1) {
   ["value"]=>
   int(42)
 }
-\Box<int>::__set_state(array(
+('Box<int>')::__set_state(array(
    'value' => 42,
 ))
 toString: Box(42)
