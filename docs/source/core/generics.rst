@@ -385,3 +385,55 @@ cold, so the dispatch cost is dwarfed by the type-comparison work. Code that doe
 turbofish doesn't emit the opcode, and the surrounding ``INIT_*`` and ``ZEND_NEW`` JIT
 specializations are unaffected. The deferred ``instanceof`` / ``catch`` lookup likewise falls
 through to ``zend_fetch_class`` like any other ``IS_UNUSED`` class operand.
+
+Test coverage matrix
+********************
+
+The generics test corpus (``Zend/tests/generics/**`` and
+``ext/reflection/tests/generics/**``) is organised as a *feature axis* × *subsystem axis*
+grid. Every cell has at least one ``.phpt`` (or an explicit ``--XFAIL--`` documenting a known
+gap). The subsystem directories are:
+
+- ``declaration/`` — parameter lists, bounds, defaults, variance, recursive bounds.
+- ``syntax/`` — declaration and turbofish surface syntax (incl. enums / readonly classes as
+  type arguments, named + spread arguments with turbofish).
+- ``turbofish/`` — call/new/instanceof turbofish, arity, bounds, first-class callables.
+- ``errors/`` — arity, bound violations, unresolvable ``T``, and rejected declarations (e.g. an
+  enum cannot declare type parameters).
+- ``erasure/`` — bound-erasure semantics of the reflected/runtime views.
+- ``reification/`` — per-frame ``T`` resolution in bodies, closures, and generators.
+- ``inheritance/`` — LSP substitution, diamonds, ``extends``/``implements``/``use`` argument
+  forwarding, bound conformance.
+- ``scoping/`` — type-parameter shadowing and capture.
+- ``traits/`` — generic traits and substituted trait members.
+- ``runtime/`` — monomorph synthesis, serialization (``serialize``/``__serialize``/
+  ``json_encode``/``var_export``), GC of monomorph cycles, destructors.
+- ``async/`` — Fibers and generators carrying a captured ``T`` across suspend/resume.
+- ``opcache/`` — preload of generic templates, file-cache round-trip of the generic side
+  tables, ``opcache_reset()``.
+- ``jit/`` — generic calls and monomorph methods in hot loops under tracing/function JIT.
+- ``interop/`` — WeakMap/SplObjectStorage keys, clone, equality, ``func_get_args``,
+  ``debug_backtrace``.
+- ``reflection/`` (both trees) — the ``ReflectionClass``/``ReflectionGeneric*`` surface and the
+  monomorph class hierarchy.
+
+Documented gaps (``--XFAIL--`` tests, tracked for follow-up):
+
+- ``jit/function_jit_generic.phpt`` — function-mode JIT mis-compiles some concrete-turbofish
+  generic calls into a by-name lookup of the (non-existent) function-monomorph name; tracing JIT
+  and the interpreter are correct. Belongs to the JIT-for-generics workstream.
+- ``inheritance/extends_args/reified_instanceof_generic_parent.phpt`` — reified ``instanceof``
+  reifies transitively through generic *interfaces* but not through a forwarding generic *parent
+  class* (a monomorph extends its template, so the substituted parent is not in the linear
+  ancestry).
+
+Behaviours pinned as current-but-notable (regular passing tests, not gaps):
+
+- ``var_export`` of a monomorph emits ``\Box<int>::__set_state(...)`` which is not re-evaluable
+  (``Box<int>`` is not valid class-reference syntax); the dynamic form ``('Box<int>')::method()``
+  does work.
+- ``never``/``void``/``null``/``mixed`` are accepted as type arguments — the engine treats a type
+  argument as an opaque type name; semantic rejection is a static-analysis concern.
+- A monomorph method's ``debug_backtrace()``/exception-trace ``class`` is the *template* name
+  (methods are shared with the template); the exact monomorph is available via the frame
+  ``object``.
