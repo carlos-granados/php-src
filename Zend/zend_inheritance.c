@@ -3040,6 +3040,17 @@ static void do_inherit_property(zend_property_info *parent_info, zend_string *ke
 
 						info = clone;
 					}
+					/* zend_substitute_leaf_type_param returns a freshly-owned
+					 * type for a composite pre-erasure (a union/intersection
+					 * list, or a named-with-args carrying T), but only a
+					 * borrowed binding for a bare top-level T-ref. The clone
+					 * (and any hook arg_info) above took their own copies via
+					 * zend_type_copy_ctor, so release the owned composite here;
+					 * a bare-T binding is borrowed and must not be released
+					 * (that is the HAS_TYPE_PARAMETER case). */
+					if (!ZEND_TYPE_HAS_TYPE_PARAMETER(*pre_erasure)) {
+						zend_type_release(sub, /* persistent */ false);
+					}
 				}
 			}
 		}
@@ -6074,12 +6085,16 @@ static void zend_diamond_collect_via_provider(
 			continue;
 		}
 
-		if (ce_to_provider) {
-			for (uint32_t j = 0; j < via_arity; j++) {
-				via[j] = zend_substitute_leaf_type_param(via[j], ce_to_provider, ce_to_provider_arity);
-			}
-		}
-
+		/* The diamond check compares only arity (its conflict signal), which is
+		 * invariant under type-parameter substitution. We deliberately do NOT
+		 * substitute ce_to_provider into `via` here: substitution would rebuild
+		 * composite args into freshly-owned zend_types whose ownership cannot be
+		 * disambiguated from the borrowed binding entries at this call site, so
+		 * they would leak. The borrowed binding types come straight from the
+		 * providers' side tables and outlive this link-time validation. (The
+		 * only observable difference is that a conflicting-arity diagnostic
+		 * prints the provider-relative argument names rather than ce-relative
+		 * ones.) */
 		zend_diamond_record_or_check(ce, target, via, via_arity,
 			source_name, records);
 		free_alloca(via, use_heap);
