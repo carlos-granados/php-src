@@ -226,6 +226,12 @@ namespace {
 
     function zend_test_array_return(): array {}
 
+#ifdef ZEND_GENERICS_STATS
+    /** Reified-generics process-lifetime counters (debug/benchmark instrumentation).
+     * Only defined when built with --enable-generics-stats. */
+    function zend_test_generics_stats(): array {}
+#endif
+
     /** @genstubs-expose-comment-block
      * "Lorem ipsum"
      * @see https://www.php.net

@@ -331,6 +331,9 @@ static uint32_t zend_type_arg_table_generation_counter = 1;
 
 ZEND_API zend_type_arg_table *zend_type_arg_table_alloc(uint32_t count) {
 	zend_type_arg_table *table = emalloc(ZEND_TYPE_ARG_TABLE_SIZE(count));
+#ifdef ZEND_GENERICS_STATS
+	EG(generics_type_arg_tables)++;
+#endif
 	table->count = count;
 	table->generation = zend_type_arg_table_generation_counter++;
 	table->persisted = false;

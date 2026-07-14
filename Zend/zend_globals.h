@@ -233,6 +233,18 @@ struct _zend_executor_globals {
 	 * would SIGSEGV when base lived in read-only opcache SHM. */
 	bool monomorph_synthesis_active;
 
+#ifdef ZEND_GENERICS_STATS
+	/* Process-lifetime reified-generics counters, exposed to userland via the
+	 * zend_test debug function zend_test_generics_stats(). Cumulative from
+	 * process start (not reset per request), so a CLI benchmark reads the total
+	 * work done. See zend_synthesize_monomorph, zend_type_arg_table_alloc and
+	 * zend_build_or_get_cached_type_args. Compiled in only with
+	 * --enable-generics-stats; production builds carry no instrumentation. */
+	uint32_t generics_class_monomorphs;      /* distinct class monomorphs synthesized */
+	uint32_t generics_type_arg_tables;       /* zend_type_arg_table allocations */
+	uint32_t generics_callsite_cache_entries; /* per-call-site type-arg tables cached */
+#endif
+
 	uint32_t jit_trace_num; /* Used by tracing JIT to reference the currently running trace */
 
 	zend_execute_data *current_observed_frame;

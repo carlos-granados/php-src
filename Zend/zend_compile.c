@@ -803,6 +803,9 @@ ZEND_API zend_type_arg_table *zend_build_or_get_cached_type_args(
 			cache_slot[0] = nt;
 			cache_slot[1] = (void *)nkey;
 			nt->persisted = true;
+#ifdef ZEND_GENERICS_STATS
+			EG(generics_callsite_cache_entries)++;
+#endif
 		}
 		return nt;
 	}
@@ -817,6 +820,9 @@ ZEND_API zend_type_arg_table *zend_build_or_get_cached_type_args(
 		cache_slot[0] = t;
 		cache_slot[1] = (void *)key;
 		t->persisted = true;
+#ifdef ZEND_GENERICS_STATS
+		EG(generics_callsite_cache_entries)++;
+#endif
 	}
 	return t;
 }
@@ -884,6 +890,9 @@ ZEND_API zend_function *zend_get_or_synthesize_call_monomorph(
 		cache_slot[1] = (void *) ZEND_TURBOFISH_CACHE_KEY_MONOMORPH;
 		cache_slot[3] = (void *) base;
 		cache_slot[4] = table;
+#ifdef ZEND_GENERICS_STATS
+		EG(generics_callsite_cache_entries)++;
+#endif
 	}
 	*out_type_args = table;
 	return mono;

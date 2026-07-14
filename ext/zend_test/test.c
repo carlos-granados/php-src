@@ -101,6 +101,17 @@ static ZEND_FUNCTION(zend_test_array_return)
 	ZEND_PARSE_PARAMETERS_NONE();
 }
 
+#ifdef ZEND_GENERICS_STATS
+static ZEND_FUNCTION(zend_test_generics_stats)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+	array_init(return_value);
+	add_assoc_long(return_value, "class_monomorphs", (zend_long) EG(generics_class_monomorphs));
+	add_assoc_long(return_value, "type_arg_tables", (zend_long) EG(generics_type_arg_tables));
+	add_assoc_long(return_value, "callsite_cache_entries", (zend_long) EG(generics_callsite_cache_entries));
+}
+#endif
+
 static ZEND_FUNCTION(zend_test_nullable_array_return)
 {
 	ZEND_PARSE_PARAMETERS_NONE();

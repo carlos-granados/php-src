@@ -1,0 +1,4 @@
+# Generated benchmark output — regenerate with run-baselines.sh. Environment-
+# specific (Ir depends on the build/toolchain), so not tracked. The curated
+# findings live in results/NOTES.md (tracked).
+results/*.json

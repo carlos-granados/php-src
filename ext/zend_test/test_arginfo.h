@@ -1,5 +1,5 @@
 /* This is a generated file, edit test.stub.php instead.
- * Stub hash: 8ca2fc33013d5a1c325bf5f0090cc6416a242297
+ * Stub hash: 6e006790a922e7e77131a7d4e65c0e1ab2bd0eee
  * Has decl header: yes */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_zend_trigger_bailout, 0, 0, IS_NEVER, 0)
@@ -7,6 +7,11 @@ ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_zend_test_array_return, 0, 0, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
+
+#if defined(ZEND_GENERICS_STATS)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_zend_test_generics_stats, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+#endif
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_zend_test_nullable_array_return, 0, 0, IS_ARRAY, 1)
 ZEND_END_ARG_INFO()
@@ -297,6 +302,9 @@ ZEND_END_ARG_INFO()
 
 static ZEND_FUNCTION(zend_trigger_bailout);
 static ZEND_FUNCTION(zend_test_array_return);
+#if defined(ZEND_GENERICS_STATS)
+static ZEND_FUNCTION(zend_test_generics_stats);
+#endif
 static ZEND_FUNCTION(zend_test_nullable_array_return);
 static ZEND_FUNCTION(zend_test_void_return);
 static ZEND_FUNCTION(zend_test_compile_string);
@@ -389,6 +397,9 @@ static ZEND_METHOD(ZendTestNS2_ZendSubNS_Foo, method);
 static const zend_function_entry ext_functions[] = {
 	ZEND_FE(zend_trigger_bailout, arginfo_zend_trigger_bailout)
 	ZEND_FE(zend_test_array_return, arginfo_zend_test_array_return)
+#if defined(ZEND_GENERICS_STATS)
+	ZEND_FE(zend_test_generics_stats, arginfo_zend_test_generics_stats)
+#endif
 #if (PHP_VERSION_ID >= 80400)
 	ZEND_RAW_FENTRY("zend_test_nullable_array_return", zif_zend_test_nullable_array_return, arginfo_zend_test_nullable_array_return, ZEND_ACC_COMPILE_TIME_EVAL, NULL, "/**\n     * \"Lorem ipsum\"\n     * @see https://www.php.net\n     * @since 8.3\n     */")
 #else

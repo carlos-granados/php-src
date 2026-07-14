@@ -12,21 +12,48 @@ const ITERS_LIGHT = 200_000;
 const ITERS_HEAVY = 1_000_000;
 const WARMUP_FRAC = 20;
 
+/* Machine-readable mode. `--json` suppresses the human text and emits, at the
+ * end, {section: {name: ns_per_op}} for use as the Phase-5 per-section
+ * reference. `BENCH_RUNS=N` (default 1) takes the median of N timed runs per
+ * scenario to tame wall-clock noise; with N=1 the default text output is
+ * byte-for-byte unchanged. */
+$GLOBALS['__bench_json']    = in_array('--json', $argv ?? [], true);
+$GLOBALS['__bench_runs']    = max(1, (int) (getenv('BENCH_RUNS') ?: 1));
+$GLOBALS['__bench_section'] = 'preamble';
+$GLOBALS['__bench_results'] = [];
+
 function bench(string $name, callable $fn, int $iters = ITERS_HEAVY): float {
-    $fn(intdiv($iters, WARMUP_FRAC));
-    $t0 = hrtime(true);
-    $fn($iters);
-    $t1 = hrtime(true);
-    $ns = ($t1 - $t0) / $iters;
-    printf("  %-55s %9.1f ns/op  (%d iters)\n", $name, $ns, $iters);
+    $runs = $GLOBALS['__bench_runs'];
+    $samples = [];
+    for ($r = 0; $r < $runs; $r++) {
+        $fn(intdiv($iters, WARMUP_FRAC));
+        $t0 = hrtime(true);
+        $fn($iters);
+        $t1 = hrtime(true);
+        $samples[] = ($t1 - $t0) / $iters;
+    }
+    sort($samples);
+    $ns = $samples[intdiv(count($samples), 2)];
+    if ($GLOBALS['__bench_json']) {
+        $GLOBALS['__bench_results'][$GLOBALS['__bench_section']][$name] = $ns;
+    } else {
+        printf("  %-55s %9.1f ns/op  (%d iters)\n", $name, $ns, $iters);
+    }
     return $ns;
 }
 
 function section(string $title): void {
+    $GLOBALS['__bench_section'] = $title;
+    if ($GLOBALS['__bench_json']) {
+        return;
+    }
     echo "\n", str_repeat("=", 70), "\n", $title, "\n", str_repeat("=", 70), "\n";
 }
 
 function compare(string $label, float $a_ns, string $a_name, float $b_ns, string $b_name): void {
+    if ($GLOBALS['__bench_json']) {
+        return;
+    }
     $delta = $a_ns - $b_ns;
     $ratio = $b_ns > 0 ? $a_ns / $b_ns : 0;
     printf("  %-55s %+9.1f ns/op delta  (%.2fx %s vs %s)\n",
@@ -323,8 +350,10 @@ function bench_instanceof_concrete(int $n): void {
 // --------------------------------------------------------------------------
 // Driver
 // --------------------------------------------------------------------------
-echo "PHP ", PHP_VERSION, " (", PHP_BINARY, ")\n";
-echo "Reified bound-erased generics benchmark\n";
+if (!$GLOBALS['__bench_json']) {
+    echo "PHP ", PHP_VERSION, " (", PHP_BINARY, ")\n";
+    echo "Reified bound-erased generics benchmark\n";
+}
 
 section("1. Non-generic baseline");
 $plain_new_ns    = bench("plain new Foo()",              'plain_new');
@@ -1043,5 +1072,18 @@ if ($opcache_on) {
 $opcache_label = $opcache_on
     ? ('enabled' . ($jit_on ? ' + JIT' : ', JIT off'))
     : ($opcache_loaded ? 'loaded but disabled (opcache.enable_cli=0)' : 'not loaded');
-echo "\nNote: opcache is $opcache_label. Same build, same interpreter\n";
-echo "      path across all scenarios — deltas between rows are the signal.\n";
+
+if ($GLOBALS['__bench_json']) {
+    echo json_encode([
+        'meta' => [
+            'php_version' => PHP_VERSION,
+            'opcache' => $opcache_label,
+            'bench_runs' => $GLOBALS['__bench_runs'],
+            'unit' => 'ns_per_op',
+        ],
+        'sections' => $GLOBALS['__bench_results'],
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), "\n";
+} else {
+    echo "\nNote: opcache is $opcache_label. Same build, same interpreter\n";
+    echo "      path across all scenarios — deltas between rows are the signal.\n";
+}

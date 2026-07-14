@@ -7268,6 +7268,11 @@ ZEND_API zend_class_entry *zend_synthesize_monomorph(
 		return existing;
 	}
 
+	/* Count only genuinely new syntheses (cache misses), not every request. */
+#ifdef ZEND_GENERICS_STATS
+	EG(generics_class_monomorphs)++;
+#endif
+
 	/* Validate bounds before committing to a class entry. */
 	zend_type extends_payload = zend_monomorph_build_extends_payload(base, args, arity);
 	{

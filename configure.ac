@@ -775,6 +775,22 @@ AS_VAR_IF([PHP_VALGRIND], [no],, [
   CFLAGS=$save_CFLAGS
 ])
 
+dnl Reified-generics debug/benchmark counters (zend_test_generics_stats()).
+dnl Off by default: the counter fields and their increments are compiled out
+dnl unless explicitly enabled, so production builds carry no instrumentation.
+PHP_ARG_ENABLE([generics-stats],
+  [whether to compile reified-generics monomorph counters],
+  [AS_HELP_STRING([--enable-generics-stats],
+    [Enable reified-generics monomorph counters exposed via
+     zend_test_generics_stats() (benchmark/debug instrumentation)])],
+  [no],
+  [no])
+
+AS_VAR_IF([PHP_GENERICS_STATS], [no],, [
+  AC_DEFINE([ZEND_GENERICS_STATS], [1],
+    [Define to 1 to compile reified-generics monomorph counters.])
+])
+
 dnl General settings.
 dnl ----------------------------------------------------------------------------
 PHP_CONFIGURE_PART([General settings])
