@@ -29,6 +29,12 @@ JOBS="$(nproc)"
 # excludes warmup (compile+JIT) from the counted runs — without it the warm/cold
 # split silently collapses (callgrind counts every -T iteration).
 CONFIGURE_FLAGS="--disable-debug --enable-opcache --enable-zend-test --enable-cgi --enable-mbstring --with-valgrind"
+# Extensions required to run the Pass 2 real-world target (mirtes-BCC + psl):
+# openssl + curl (BCC runs Composer in-process to install each scanned ref's
+# deps; curl avoids the stream path php 8.6 rejects), bcmath, intl (ICU), sodium.
+# Identical on both builds so Pass 1 deltas are unaffected (the canary never
+# touches these modules).
+CONFIGURE_FLAGS="$CONFIGURE_FLAGS --with-openssl --with-curl --enable-bcmath --enable-intl --with-sodium"
 # --enable-generics-stats compiles in the monomorph counters; only meaningful on
 # reify (master has no generics and no such configure flag), so it is added per
 # build below, not to the shared flags.
@@ -58,9 +64,15 @@ build_one() {
   git -C "$SRC" worktree add --detach "$dir" "$ref"
 
   if [[ "$apply_instrumentation" == "yes" ]]; then
-    echo "=== [$name] applying uncommitted instrumentation patch ==="
-    git -C "$SRC" diff --binary HEAD -- "${INSTRUMENTATION_FILES[@]}" \
-      | git -C "$dir" apply --index
+    # The instrumentation may be uncommitted (apply as a patch) or already
+    # committed into $ref (patch is empty — nothing to do). Handle both.
+    local patch; patch="$(git -C "$SRC" diff --binary HEAD -- "${INSTRUMENTATION_FILES[@]}")"
+    if [[ -n "$patch" ]]; then
+      echo "=== [$name] applying uncommitted instrumentation patch ==="
+      printf '%s\n' "$patch" | git -C "$dir" apply --index
+    else
+      echo "=== [$name] instrumentation already present in $ref (no patch needed) ==="
+    fi
   fi
 
   echo "=== [$name] buildconf + configure ==="
