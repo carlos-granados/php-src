@@ -81,23 +81,64 @@ JIT is warm — the same effect Pass 1 saw at the micro level. Conversely the
 *tax* (generics unused) narrows to +4.59% warm+JIT, because JIT optimizes the
 hot path for both builds.
 
+## Result 3 — doctrine/collections, CLASS-level generics (`doctrine_pipeline.php`)
+
+psl (Results 1–2) tested generic *functions*; this tests generic *classes* and a
+generic interface hierarchy (`ArrayCollection<TKey,T> implements Collection<TKey,T>
+extends ReadableCollection<TKey,T>…`), converted with `convert-doctrine.sh`
+(class + interface generics **and** the generic methods the driver exercises —
+`map<U>` and `contains<TMaybeContained>`; `indexOf`/`reduce`/`removeElement` are
+also generic but unused by the driver). `new ArrayCollection::<int,int>()`
+synthesises a real class monomorph and `new static()` in `map`/`filter`/`partition`
+propagates it — reaching the monomorph **method-dispatch** path where Pass 1 found
+the biggest JIT penalty, which psl structurally could not. `data: pass2-doctrine.json`.
+
+| config | master | reify | defaulted | turbofish | tax | dflt-cost | tf-cost |
+|--------|-------:|------:|----------:|----------:|----:|----------:|--------:|
+| Opcache OFF     | 286.5M | 305.4M | 305.7M | 305.8M | +6.6% | +0.1% | +0.1% |
+| JIT off, warm   | 228.4M | 248.5M | 245.6M | 245.7M | +8.8% | −1.2%* | −1.1%* |
+| **JIT on, warm** | **199.2M** | **214.1M** | **229.6M** | **229.7M** | **+7.5%** | **+7.2%** | **+7.3%** |
+
+(\* ~1–6% run-to-run variance in some cold/JIT-cold cells; the doctrine workload
+is noisier than psl's. The JIT-warm row is stable across runs.)
+
+**The cost of using generic classes is ~0% until JIT is warm, then +7.2% — and
+defaulted == turbofish.** This is the purest demonstration of the class-monomorph
+JIT-skip: both defaulted (`ArrayCollection<mixed,mixed>`) and turbofish
+(`ArrayCollection<int,int>`) create cached monomorphs synthesised once, so the
+repeated cost is method dispatch on the monomorph object. Without JIT that
+dispatch is interpreted at the plain cost (~0% delta); with JIT warm the plain
+methods get compiled but the monomorph methods are skipped → +7.2%. **Making the
+conversion faithful (adding `map<U>`/`contains<…>` method generics) did not change
+this** — the per-method-call type-arg binding is cached per call site, so it adds
+little; the +7.2% is dominated by the class-monomorph method-dispatch JIT-skip.
+Total generic-on-reify vs plain-on-master (JIT-warm) = **+15.3%**.
+
 ## Synthesis (RFC-relevant)
 
-- **The "tax" (reify overhead with generics UNUSED)** is ~7–9% on this
-  call-dense workload across configs, narrowing to **+4.59% in the production
-  JIT-warm config**; on a broad real app (BCC) it is **~5%**, and on Pass 1's
-  synthetic canary **~2%**. So the unused-generics tax scales with call density
-  and sits around +5% for real code.
-- **The cost of USING native generics is dominated by whether JIT is on**, because
-  JIT optimizes the plain code but skips monomorphs:
-  - *JIT off:* ~0% (BCC, collections a small slice) to ~5–7% (collection-heavy).
-  - *JIT on (production):* **~4% even in a whole real app (BCC)** where generics
-    are a small part, rising to **+12% when generic collections dominate**.
-- The JIT-on generics penalty — visible in **both** the whole app and the
-  collection-heavy runner — is the single clearest pointer to **Phase 5 item 7
-  (re-enable JIT for monomorphs)**. The always-on tax (~5% on real code) points
-  at the per-call type-arg-table alloc (no caching for defaulted calls) and
-  call/link overhead.
+Three distinct numbers — **generic code pays #1 + #2**, so the number a user feels
+vs today's PHP is #3, never zero:
+
+1. **Tax** — what *all* reify code pays vs stock PHP, generics used or not
+   (`reify_plain` vs `master`): **~5–8% on real code** (BCC ~5%, doctrine ~6.6%,
+   psl collection-heavy ~7–9%; Pass 1 synthetic canary ~2%). Present at all
+   times, JIT or not. Cause: always-on per-call type-arg-table alloc and
+   call/link overhead.
+2. **Incremental generics cost** — generic vs non-generic code *both on reify*
+   (`reify_generic` vs `reify_plain`): **~0% without JIT**, rising under JIT-warm
+   to **~4% (BCC, generics a small slice)**, **~7% (doctrine, class-level)**,
+   **~12% (psl, function-level, collection-dominated)**. Cause: JIT compiles the
+   plain code but skips monomorphs.
+3. **Total a user feels** — generic code on reify vs the equivalent on stock PHP
+   (`reify_generic` vs `master`) ≈ (1+tax)·(1+incremental). **Without JIT this is
+   ≈ the tax (~5–8%), NOT zero** — generic code always pays the tax. With JIT-warm
+   it is tax + monomorph penalty, e.g. doctrine **+15.3%**, BCC ~+9%, psl higher.
+
+So: **using generics is never free** — generic code always pays the ~5–8% tax
+that all reify code pays; JIT-warm then stacks the monomorph penalty on top. The
+JIT-warm monomorph penalty (#2 under JIT) is the clearest pointer to **Phase 5
+item 7 (JIT for monomorphs)**; the always-on tax (#1) is a separate target
+(per-call table alloc + call/link overhead).
 
 ## Caveats
 
