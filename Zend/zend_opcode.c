@@ -619,6 +619,20 @@ ZEND_API void destroy_zend_class(zval *zv)
 			zend_type_arg_table_destroy(ce->generic_type_args);
 			ce->generic_type_args = NULL;
 		}
+		/* A lazy-loaded generic class detached its trait_names into an
+		 * emalloc'd copy for monomorph rewriting (see zend_do_link_class).
+		 * Unlike interface_names (a union freed at link time), trait_names
+		 * survives to teardown, so free the heap copy here. trait_aliases /
+		 * precedences were not detached and stay cache-resident. */
+		if ((ce->ce_flags2 & ZEND_ACC2_CE_DETACHED_LINK_NAMES) && ce->num_traits > 0) {
+			uint32_t i;
+			for (i = 0; i < ce->num_traits; i++) {
+				zend_string_release_ex(ce->trait_names[i].name, 0);
+				zend_string_release_ex(ce->trait_names[i].lc_name, 0);
+			}
+			efree(ce->trait_names);
+			ce->trait_names = NULL;
+		}
 		return;
 	}
 
@@ -659,6 +673,19 @@ ZEND_API void destroy_zend_class(zval *zv)
 				if (ce->num_traits > 0) {
 					_destroy_zend_class_traits_info(ce);
 				}
+			} else if ((ce->ce_flags2 & ZEND_ACC2_CE_DETACHED_LINK_NAMES) && ce->num_traits > 0) {
+				/* CACHED lazy-loaded generic class (SHM opcache, not file
+				 * cache): the CACHED-gated block above is skipped, but its
+				 * detached emalloc'd trait_names copy still needs freeing.
+				 * Only trait_names was detached; aliases/precedences stay
+				 * cache-resident. */
+				uint32_t i;
+				for (i = 0; i < ce->num_traits; i++) {
+					zend_string_release_ex(ce->trait_names[i].name, 0);
+					zend_string_release_ex(ce->trait_names[i].lc_name, 0);
+				}
+				efree(ce->trait_names);
+				ce->trait_names = NULL;
 			}
 
 			if (ce->default_properties_table) {
@@ -965,6 +992,30 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 			zend_type_release(arg_info[i].type, /* persistent */ false);
 		}
 		op_array->arg_info = NULL;
+	}
+
+	/* A runtime-synthesized function monomorph (by-name dispatch under opcache)
+	 * shares the base op-array body (refcount == NULL, so this function returns
+	 * just below without reaching the generic_types teardown at the end). It
+	 * owns the entry names + owned_types of its arena-allocated
+	 * monomorph_type_args (built in zend_synthesize_function_monomorph); the
+	 * arena reclaims only the struct, so release the refcounted entry name
+	 * here — mirroring the GENERIC_ARGINFO_CLONE block above. Idempotent;
+	 * skipped for immutable/SHM copies whose names are interned/shared.
+	 * owned_type is arena-allocated (zend_type_copy_ctor use_arena=true), so
+	 * it is reclaimed with the arena and must NOT be zend_type_release'd —
+	 * doing so would efree its arena-held type list and corrupt the heap. */
+	if ((op_array->fn_flags2 & ZEND_ACC2_MONOMORPH_TYPE_ARGS)
+			&& !(op_array->fn_flags & ZEND_ACC_IMMUTABLE)
+			&& op_array->generic_types
+			&& op_array->generic_types->monomorph_type_args) {
+		zend_type_arg_table *mt = op_array->generic_types->monomorph_type_args;
+		for (uint32_t k = 0; k < mt->count; k++) {
+			if (mt->entries[k].name) {
+				zend_string_release(mt->entries[k].name);
+				mt->entries[k].name = NULL;
+			}
+		}
 	}
 
 	if (!op_array->refcount || --(*op_array->refcount) > 0) {

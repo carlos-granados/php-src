@@ -3865,7 +3865,11 @@ static void zend_do_implement_interfaces(zend_class_entry *ce, zend_class_entry 
 		}
 	}
 
-	if (!(ce->ce_flags & ZEND_ACC_CACHED)) {
+	/* A lazy-loaded generic class is CACHED yet owns an emalloc'd detached
+	 * interface_names copy (see zend_do_link_class); free it here before the
+	 * union field is overwritten with the resolved interfaces[] pointer. */
+	if (!(ce->ce_flags & ZEND_ACC_CACHED)
+			|| (ce->ce_flags2 & ZEND_ACC2_CE_DETACHED_LINK_NAMES)) {
 		for (i = 0; i < ce->num_interfaces; i++) {
 			zend_string_release_ex(ce->interface_names[i].name, 0);
 			zend_string_release_ex(ce->interface_names[i].lc_name, 0);
@@ -4066,6 +4070,12 @@ static void zend_substitute_trait_method_arg_info(
 					new_block = zend_clone_arg_info_block(orig_block, total);
 				}
 				uint32_t carry = ZEND_TYPE_FULL_MASK(new_block[0].type) & arg_extra_flags_mask;
+				/* zend_clone_arg_info_block copy_ctor'd every slot; release the
+				 * cloned (erased) type we are about to replace so its addref'd
+				 * name isn't orphaned. Erased signature types are concrete
+				 * (name / mask / arena-list — never an arena NWA), so
+				 * zend_type_release is arena-safe here. */
+				zend_type_release(new_block[0].type, /* persistent */ false);
 				new_block[0].type = sub;
 				ZEND_TYPE_FULL_MASK(new_block[0].type) |= carry;
 				zend_type_copy_ctor(&new_block[0].type, /* use_arena */ true, /* persistent */ false);
@@ -4096,6 +4106,9 @@ static void zend_substitute_trait_method_arg_info(
 				new_block = zend_clone_arg_info_block(orig_block, total);
 			}
 			uint32_t carry = ZEND_TYPE_FULL_MASK(new_block[return_slot_offset + idx].type) & arg_extra_flags_mask;
+			/* Release the cloned (erased) param type before overwriting it —
+			 * see the return-type case above. */
+			zend_type_release(new_block[return_slot_offset + idx].type, /* persistent */ false);
 			new_block[return_slot_offset + idx].type = sub;
 			ZEND_TYPE_FULL_MASK(new_block[return_slot_offset + idx].type) |= carry;
 			zend_type_copy_ctor(&new_block[return_slot_offset + idx].type, /* use_arena */ true, /* persistent */ false);
@@ -6257,6 +6270,7 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 				zend_string_addref(ce->interface_names[k].name);
 				zend_string_addref(ce->interface_names[k].lc_name);
 			}
+			ce->ce_flags2 |= ZEND_ACC2_CE_DETACHED_LINK_NAMES;
 		}
 		if (ce->num_traits) {
 			zend_class_name *src = ce->trait_names;
@@ -6266,6 +6280,7 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 				zend_string_addref(ce->trait_names[k].name);
 				zend_string_addref(ce->trait_names[k].lc_name);
 			}
+			ce->ce_flags2 |= ZEND_ACC2_CE_DETACHED_LINK_NAMES;
 		}
 	}
 

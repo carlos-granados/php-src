@@ -1248,10 +1248,13 @@ static zend_property_info *zend_persist_substituted_property_info(zend_property_
 	}
 
 	if (prop->name) {
-		zend_string *xlat_name = zend_shared_alloc_get_xlat_entry(prop->name);
-		if (xlat_name) {
-			prop->name = xlat_name;
-		}
+		/* A generic clone OWNS a reference on `name` (addref'd in
+		 * do_inherit_property), unlike the borrowed doc_comment/attributes
+		 * below. Store-intern it — this releases our heap copy whether an
+		 * SHM xlat already exists or we memdup a fresh one. Merely rebinding
+		 * the pointer on an xlat hit (and doing nothing on a miss) would
+		 * orphan the heap string and leak it under opcache. */
+		zend_accel_store_interned_string(prop->name);
 	}
 
 	if (prop->doc_comment) {
@@ -1470,6 +1473,22 @@ zend_class_entry *zend_persist_class_entry(zend_class_entry *orig_ce)
 		}
 
 		if (ce->ce_flags & ZEND_ACC_CACHED) {
+			/* A lazy-loaded generic class (CACHED) detached its trait_names
+			 * into an emalloc'd heap copy for monomorph rewriting. Everything
+			 * else on this class is already SHM-resident, so we early-return
+			 * here — but that heap copy would then be orphaned and leak when
+			 * the inheritance-cache SHM entry is torn down. Relocate it into
+			 * SHM now (interface_names is already resolved to interfaces[] by
+			 * link time, so only trait_names can still be heap). */
+			if ((ce->ce_flags2 & ZEND_ACC2_CE_DETACHED_LINK_NAMES) && ce->num_traits) {
+				uint32_t i;
+				for (i = 0; i < ce->num_traits; i++) {
+					zend_accel_store_interned_string(ce->trait_names[i].name);
+					zend_accel_store_interned_string(ce->trait_names[i].lc_name);
+				}
+				ce->trait_names = zend_shared_memdup_free(ce->trait_names, sizeof(zend_class_name) * ce->num_traits);
+				ce->ce_flags2 &= ~ZEND_ACC2_CE_DETACHED_LINK_NAMES;
+			}
 			return ce;
 		}
 

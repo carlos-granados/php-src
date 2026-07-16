@@ -683,6 +683,10 @@ static void zend_persist_property_info_calc(zend_property_info *prop)
 static void zend_persist_substituted_property_info_calc(zend_property_info *prop)
 {
 	ADD_SIZE(sizeof(zend_property_info));
+	/* Mirror the store-intern of the owned name in zend_persist.c. */
+	if (prop->name) {
+		ADD_INTERNED_STRING(prop->name);
+	}
 	zend_persist_type_calc(&prop->type);
 	if (prop->hooks) {
 		ADD_SIZE(ZEND_PROPERTY_HOOK_STRUCT_SIZE);
@@ -799,6 +803,17 @@ void zend_persist_class_entry_calc(zend_class_entry *ce)
 		}
 
 		if (ce->ce_flags & ZEND_ACC_CACHED) {
+			/* Match the detached-trait_names relocation in zend_persist.c:
+			 * account for the heap copy that will be moved into SHM before
+			 * the CACHED early-return there. */
+			if ((ce->ce_flags2 & ZEND_ACC2_CE_DETACHED_LINK_NAMES) && ce->num_traits) {
+				uint32_t i;
+				for (i = 0; i < ce->num_traits; i++) {
+					ADD_INTERNED_STRING(ce->trait_names[i].name);
+					ADD_INTERNED_STRING(ce->trait_names[i].lc_name);
+				}
+				ADD_SIZE(sizeof(zend_class_name) * ce->num_traits);
+			}
 			return;
 		}
 

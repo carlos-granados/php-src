@@ -565,10 +565,14 @@ typedef struct _zend_oparray_context {
 /* default scan when synthesizing a defaults monomorph.   |     |     |     */
 #define ZEND_ACC_GENERIC_ALL_DEFAULTS    (1u << 31) /* X  |     |     |     */
 /*                                                        |     |     |     */
-/* Class Flags 2 (ce_flags2) (unused: 0-31)               |     |     |     */
+/* Class Flags 2 (ce_flags2) (unused: 1-31)               |     |     |     */
 /* =========================                              |     |     |     */
 /*                                                        |     |     |     */
-/* #define ZEND_ACC2_EXAMPLE             (1 << 0)      X  |     |     |     */
+/* Lazy-loaded generic class whose interface_names/       |     |     |     */
+/* trait_names arrays were detached into emalloc'd heap   |     |     |     */
+/* copies for monomorph rewriting: those copies must be   |     |     |     */
+/* freed at link/teardown even though the ce is CACHED    |     |     |     */
+#define ZEND_ACC2_CE_DETACHED_LINK_NAMES (1 << 0)  /* X  |     |     |     */
 /*                                                        |     |     |     */
 /* Function Flags (unused: 30)                            |     |     |     */
 /* ==============                                         |     |     |     */
