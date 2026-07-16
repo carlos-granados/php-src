@@ -446,6 +446,7 @@ static zend_generic_parameter_list *zend_persist_generic_parameter_list(zend_gen
 		list,
 		ZEND_GENERIC_PARAMETER_LIST_SIZE(list->count)
 	);
+	persisted->persisted = true;
 
 	for (uint32_t i = 0; i < persisted->count; i++) {
 		zend_generic_parameter *param = &persisted->parameters[i];

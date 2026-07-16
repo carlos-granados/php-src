@@ -146,6 +146,7 @@ ZEND_API zend_generic_parameter_list *zend_generic_parameter_list_alloc(uint32_t
 	ZEND_ASSERT(count > 0);
 	zend_generic_parameter_list *list = pemalloc(ZEND_GENERIC_PARAMETER_LIST_SIZE(count), persistent);
 	list->count = count;
+	list->persisted = false;
 	for (uint32_t i = 0; i < count; i++) {
 		list->parameters[i].name = NULL;
 		list->parameters[i].variance = 0;
@@ -158,7 +159,12 @@ ZEND_API zend_generic_parameter_list *zend_generic_parameter_list_alloc(uint32_t
 }
 
 ZEND_API void zend_generic_parameter_list_destroy(zend_generic_parameter_list *list) {
-	if (!list) {
+	if (!list || list->persisted) {
+		/* A lazy-loaded (mutable) generic class/op_array shares the immutable
+		 * template's generic_parameters pointer, which opcache relocated into
+		 * read-only SHM (or the mmap'd file cache). Destroying the mutable copy
+		 * must not efree that shared allocation. Mirrors the persisted-guard in
+		 * zend_generic_type_table_destroy. */
 		return;
 	}
 	for (uint32_t i = 0; i < list->count; i++) {
