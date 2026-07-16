@@ -8957,7 +8957,7 @@ static int zend_jit_restart_hot_trace_counters(zend_op_array *op_array)
 	return SUCCESS;
 }
 
-static int zend_jit_setup_hot_trace_counters(zend_op_array *op_array)
+static int zend_jit_setup_hot_trace_counters_ex(zend_op_array *op_array, bool runtime)
 {
 	zend_op *opline;
 	zend_jit_op_array_trace_extension *jit_extension;
@@ -8965,7 +8965,15 @@ static int zend_jit_setup_hot_trace_counters(zend_op_array *op_array)
 
 	ZEND_ASSERT(sizeof(zend_op_trace_info) == sizeof(zend_op));
 
-	jit_extension = (zend_jit_op_array_trace_extension*)zend_shared_alloc(sizeof(zend_jit_op_array_trace_extension) + (op_array->last - 1) * sizeof(zend_op_trace_info));
+	if (runtime) {
+		/* Runtime-synthesized generic monomorph: no SHM lock is held and the
+		 * op_array (with its detached opcode buffer) is request-local, so the
+		 * extension lives in the request arena instead of shared memory. */
+		jit_extension = (zend_jit_op_array_trace_extension*)zend_arena_alloc(&CG(arena),
+			sizeof(zend_jit_op_array_trace_extension) + (op_array->last - 1) * sizeof(zend_op_trace_info));
+	} else {
+		jit_extension = (zend_jit_op_array_trace_extension*)zend_shared_alloc(sizeof(zend_jit_op_array_trace_extension) + (op_array->last - 1) * sizeof(zend_op_trace_info));
+	}
 	if (!jit_extension) {
 		return FAILURE;
 	}
@@ -9031,9 +9039,49 @@ static int zend_jit_setup_hot_trace_counters(zend_op_array *op_array)
 		}
 	}
 
-	zend_shared_alloc_register_xlat_entry(op_array->opcodes, jit_extension);
+	if (!runtime) {
+		/* The xlat entry deduplicates extensions across op_arrays sharing one
+		 * opcode buffer during script persist; it is only valid (and only
+		 * safe) while the SHM allocator's xlat table is active. */
+		zend_shared_alloc_register_xlat_entry(op_array->opcodes, jit_extension);
+	}
 
 	return SUCCESS;
+}
+
+static int zend_jit_setup_hot_trace_counters(zend_op_array *op_array)
+{
+	return zend_jit_setup_hot_trace_counters_ex(op_array, /* runtime */ false);
+}
+
+/* zend_jit_op_array_runtime_setup hook: called by zend_synthesize_function_monomorph
+ * for each runtime monomorph after it detached its opcode buffer. Installs
+ * per-monomorph trace counters so the monomorph can be traced and compiled with
+ * its own substituted arg_info. Guarded here (not at hook-set time) because
+ * JIT_G(on) can be toggled per request. */
+static void zend_jit_monomorph_runtime_setup(zend_op_array *op_array)
+{
+	if (!zend_jit_startup_ok
+			|| !JIT_G(enabled)
+			|| !JIT_G(on)
+			|| JIT_G(trigger) != ZEND_JIT_ON_HOT_TRACE
+			|| dasm_ptr == NULL) {
+		return;
+	}
+	/* The extension and patched handlers are request-local (arena), but the
+	 * counter-slot cursor ZEND_JIT_COUNTER_NUM lives in SHM: writing it needs
+	 * the allocator lock (cross-process round-robin) and, under
+	 * opcache.protect_memory, an unprotect window. If this process already
+	 * holds the lock (synthesis triggered inside a persist/compile window),
+	 * skip the setup — the monomorph simply stays interpreted. */
+	if (ZCG(locked)) {
+		return;
+	}
+	zend_shared_alloc_lock();
+	SHM_UNPROTECT();
+	zend_jit_setup_hot_trace_counters_ex(op_array, /* runtime */ true);
+	SHM_PROTECT();
+	zend_shared_alloc_unlock();
 }
 
 static void zend_jit_trace_init_caches(void)

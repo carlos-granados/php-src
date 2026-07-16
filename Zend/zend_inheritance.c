@@ -7237,6 +7237,8 @@ ZEND_API zend_class_entry *zend_synthesize_monomorph_resolved(
 	return zend_synthesize_monomorph(base, resolved, arity);
 }
 
+static void zend_monomorph_detach_opcodes(zend_op_array *mono, const zend_op_array *base);
+
 ZEND_API zend_class_entry *zend_synthesize_monomorph(
 	zend_class_entry *base, const zend_type *args, uint32_t arity)
 {
@@ -7549,6 +7551,34 @@ ZEND_API zend_class_entry *zend_synthesize_monomorph(
 			clone->type = sub;
 			zend_type_copy_ctor(&clone->type, /* use_arena */ true, /* persistent */ false);
 			Z_PTR_P(cv) = clone;
+		} ZEND_HASH_FOREACH_END();
+	}
+
+	/* Tracing JIT: give each substituted method clone its own opcode buffer
+	 * and per-monomorph hot-trace counters, so this binding's methods can be
+	 * traced and compiled against THEIR substituted arg_info without touching
+	 * the template or sibling monomorphs. Only request-local clones qualify:
+	 * ARGINFO_CLONE marks a private-arg_info clone over a shared body, and
+	 * !IMMUTABLE excludes SHM-persisted clones inherited from cached concrete
+	 * classes (their fn structs are read-only). This runs AFTER the link, so
+	 * an inheritance-cache entry persisted during the link keeps the shared,
+	 * counter-free state. The runtime cache is allocated eagerly because
+	 * JIT'd method entry reads RUN_TIME_CACHE without the interpreter's
+	 * lazy-alloc fallback. */
+	if (zend_jit_op_array_runtime_setup) {
+		zend_function *mfn;
+		ZEND_HASH_MAP_FOREACH_PTR(&linked->function_table, mfn) {
+			if (mfn->type == ZEND_USER_FUNCTION
+					&& (mfn->common.fn_flags2 & ZEND_ACC2_GENERIC_ARGINFO_CLONE)
+					&& !(mfn->common.fn_flags2 & ZEND_ACC2_JIT_MONO_SETUP)
+					&& !(mfn->common.fn_flags & ZEND_ACC_IMMUTABLE)) {
+				mfn->common.fn_flags2 |= ZEND_ACC2_JIT_MONO_SETUP;
+				zend_monomorph_detach_opcodes(&mfn->op_array, &mfn->op_array);
+				if (!RUN_TIME_CACHE(&mfn->op_array)) {
+					zend_init_func_run_time_cache(&mfn->op_array);
+				}
+				zend_jit_op_array_runtime_setup(&mfn->op_array);
+			}
 		} ZEND_HASH_FOREACH_END();
 	}
 
@@ -7974,6 +8004,90 @@ static zend_arg_info *zend_monomorph_build_arg_info(
 	return new_block + (has_return ? 1 : 0);
 }
 
+/* Give a runtime monomorph its OWN opcode buffer so the tracing JIT can patch
+ * opline handlers and bake per-binding arg_info without corrupting the template
+ * or sibling monomorphs (they otherwise share one buffer). Opcodes AND literals
+ * are copied into a single arena block: IS_CONST operands are opline-relative
+ * int32 offsets (when !ZEND_USE_ABS_CONST_ADDR), and keeping both arrays in one
+ * allocation guarantees the recomputed offsets stay in range — pointing the
+ * copied opcodes at the template's SHM literals could exceed ±2GB. The literal
+ * zvals are shallow-copied: their contents (strings, arrays, attribute tables)
+ * stay owned by the template, which outlives the request-lifetime monomorph;
+ * destroy_op_array never frees a monomorph's buffers (refcount == NULL) and the
+ * arena releases the block in bulk. Jump targets are opline-relative (when
+ * !ZEND_USE_ABS_JMP_ADDR) and survive a contiguous copy unchanged. */
+static void zend_monomorph_detach_opcodes(zend_op_array *mono, const zend_op_array *base)
+{
+	size_t ops_size = sizeof(zend_op) * base->last;
+	size_t lit_size = sizeof(zval) * base->last_literal;
+	zend_op *new_opcodes = zend_arena_alloc(&CG(arena), ops_size + lit_size);
+	zval *new_literals = base->literals ? (zval*)((char*)new_opcodes + ops_size) : NULL;
+
+	memcpy(new_opcodes, base->opcodes, ops_size);
+	if (new_literals) {
+		memcpy(new_literals, base->literals, lit_size);
+	}
+
+	for (uint32_t i = 0; i < base->last; i++) {
+		zend_op *opline = new_opcodes + i;
+		const zend_op *orig = base->opcodes + i;
+
+#if ZEND_USE_ABS_CONST_ADDR
+		if (opline->op1_type == IS_CONST) {
+			opline->op1.zv = new_literals + (orig->op1.zv - base->literals);
+		}
+		if (opline->op2_type == IS_CONST) {
+			opline->op2.zv = new_literals + (orig->op2.zv - base->literals);
+		}
+#else
+		if (opline->op1_type == IS_CONST) {
+			opline->op1.constant =
+				(char*)(new_literals +
+					((zval*)((char*)orig + (int32_t)orig->op1.constant) - base->literals)) -
+				(char*)opline;
+		}
+		if (opline->op2_type == IS_CONST) {
+			opline->op2.constant =
+				(char*)(new_literals +
+					((zval*)((char*)orig + (int32_t)orig->op2.constant) - base->literals)) -
+				(char*)opline;
+		}
+#endif
+#if ZEND_USE_ABS_JMP_ADDR
+		if (base->fn_flags & ZEND_ACC_DONE_PASS_TWO) {
+			switch (opline->opcode) {
+				case ZEND_JMP:
+				case ZEND_FAST_CALL:
+					opline->op1.jmp_addr = &new_opcodes[orig->op1.jmp_addr - base->opcodes];
+					break;
+				case ZEND_JMPZ:
+				case ZEND_JMPNZ:
+				case ZEND_JMPZ_EX:
+				case ZEND_JMPNZ_EX:
+				case ZEND_JMP_SET:
+				case ZEND_COALESCE:
+				case ZEND_FE_RESET_R:
+				case ZEND_FE_RESET_RW:
+				case ZEND_ASSERT_CHECK:
+				case ZEND_JMP_NULL:
+				case ZEND_BIND_INIT_STATIC_OR_JMP:
+				case ZEND_JMP_FRAMELESS:
+					opline->op2.jmp_addr = &new_opcodes[orig->op2.jmp_addr - base->opcodes];
+					break;
+				case ZEND_CATCH:
+					if (!(opline->extended_value & ZEND_LAST_CATCH)) {
+						opline->op2.jmp_addr = &new_opcodes[orig->op2.jmp_addr - base->opcodes];
+					}
+					break;
+			}
+		}
+#endif
+	}
+
+	mono->opcodes = new_opcodes;
+	mono->literals = new_literals;
+}
+
 ZEND_API zend_function *zend_synthesize_function_monomorph(
 		zend_function *base, const zend_type *args, uint32_t arity)
 {
@@ -8103,6 +8217,14 @@ ZEND_API zend_function *zend_synthesize_function_monomorph(
 	/* Allocate the runtime cache now: the call swaps to this op_array before
 	 * DO_FCALL, whose hot path reads RUN_TIME_CACHE without lazy allocation. */
 	zend_init_func_run_time_cache(mono);
+
+	/* Tracing JIT: detach the opcode buffer and install per-monomorph hot-trace
+	 * counters so this binding can be traced and compiled with ITS substituted
+	 * arg_info (the template and its other monomorphs stay independent). */
+	if (zend_jit_op_array_runtime_setup) {
+		zend_monomorph_detach_opcodes(mono, &base->op_array);
+		zend_jit_op_array_runtime_setup(mono);
+	}
 
 	zend_function *mono_fn = (zend_function *) mono;
 	if (!zend_hash_add_ptr(EG(function_table), lc_name, mono_fn)) {

@@ -3885,6 +3885,13 @@ void zend_jit_startup(void *buf, size_t size, bool reattached)
 
 	zend_jit_trace_startup(reattached);
 
+	/* Let runtime-synthesized generic monomorphs opt into tracing-JIT
+	 * counters (they never pass through zend_jit_op_array). The callback
+	 * itself checks JIT_G(on)/trigger per invocation. */
+	if (JIT_G(trigger) == ZEND_JIT_ON_HOT_TRACE) {
+		zend_jit_op_array_runtime_setup = zend_jit_monomorph_runtime_setup;
+	}
+
 	zend_jit_unprotect();
 	/* save JIT buffer pos */
 	dasm_ptr[1] = dasm_ptr[0];
@@ -3893,6 +3900,8 @@ void zend_jit_startup(void *buf, size_t size, bool reattached)
 
 void zend_jit_shutdown(void)
 {
+	zend_jit_op_array_runtime_setup = NULL;
+
 	if (JIT_G(debug) & ZEND_JIT_DEBUG_SIZE && dasm_ptr != NULL) {
 		fprintf(stderr, "\nJIT memory usage: %td\n", (ptrdiff_t)((char*)*dasm_ptr - (char*)dasm_buf));
 	}

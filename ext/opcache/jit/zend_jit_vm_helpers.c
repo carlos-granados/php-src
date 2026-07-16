@@ -56,6 +56,12 @@ ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_leave_func_helper_tai
 		}
 
 		zend_vm_stack_free_extra_args_ex(call_info, execute_data);
+		/* Destroy+clear the frame's type-arg table BEFORE releasing the
+		 * closure — see zend_jit_leave_nested_func_helper. */
+		if (UNEXPECTED(EX(type_args) != NULL)) {
+			zend_type_arg_table_destroy(EX(type_args));
+			EX(type_args) = NULL;
+		}
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
 		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
@@ -90,6 +96,12 @@ ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_leave_func_helper_tai
 		if (UNEXPECTED(call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS)) {
 			zend_free_extra_named_params(EX(extra_named_params));
 		}
+		/* Destroy+clear the frame's type-arg table BEFORE releasing the
+		 * closure — see zend_jit_leave_nested_func_helper. */
+		if (UNEXPECTED(EX(type_args) != NULL)) {
+			zend_type_arg_table_destroy(EX(type_args));
+			EX(type_args) = NULL;
+		}
 		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
@@ -107,6 +119,16 @@ ZEND_OPCODE_HANDLER_RET ZEND_FASTCALL zend_jit_leave_nested_func_helper(ZEND_OPC
 	}
 
 	zend_vm_stack_free_extra_args_ex(call_info, execute_data);
+	/* Destroy (and clear) the frame's type-arg table BEFORE releasing the
+	 * closure: a closure frame borrows the closure's captured table, and if
+	 * this release drops the closure's last reference its dtor frees that
+	 * table — zend_vm_stack_free_call_frame_ex below would then read the
+	 * frame's stale pointer to it. The interpreter leave has the same order
+	 * (zend_free_compiled_variables destroys+NULLs EX(type_args) first). */
+	if (UNEXPECTED(EX(type_args) != NULL)) {
+		zend_type_arg_table_destroy(EX(type_args));
+		EX(type_args) = NULL;
+	}
 	if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 		OBJ_RELEASE(Z_OBJ(execute_data->This));
 	} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
@@ -151,6 +173,12 @@ ZEND_OPCODE_HANDLER_RET ZEND_FASTCALL zend_jit_leave_top_func_helper(ZEND_OPCODE
 	}
 	if (UNEXPECTED(call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS)) {
 		zend_free_extra_named_params(EX(extra_named_params));
+	}
+	/* Destroy+clear the frame's type-arg table BEFORE releasing the
+	 * closure — see zend_jit_leave_nested_func_helper. */
+	if (UNEXPECTED(EX(type_args) != NULL)) {
+		zend_type_arg_table_destroy(EX(type_args));
+		EX(type_args) = NULL;
 	}
 	if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
@@ -655,6 +683,16 @@ static int zend_jit_trace_record_fake_init_call_ex(zend_execute_data *call, zend
 			} else if (func->op_array.fn_flags & ZEND_ACC_CLOSURE) {
 				func = (zend_function*)jit_extension->op_array;
 			}
+			if (func
+			 && func->op_array.generic_parameters
+			 && !(func->op_array.fn_flags2 & ZEND_ACC2_MONOMORPH_TYPE_ARGS)) {
+				/* Generic template: dispatch may swap call->func to a runtime
+				 * monomorph (a different op_array) before DO_FCALL, so the
+				 * callee recorded here wouldn't match the entered frame.
+				 * Record an unknown callee; the ENTER builds the frame from
+				 * whatever function actually runs. */
+				func = NULL;
+			}
 		}
 
 		if (!func
@@ -754,6 +792,17 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 	int last_loop_level = -1;
 	const zend_op *last_loop_opline = NULL;
 	const zend_op_array *unrolled_calls[ZEND_JIT_TRACE_MAX_CALL_DEPTH + ZEND_JIT_TRACE_MAX_RET_DEPTH];
+	/* Stack of trace-buffer indices of not-yet-consumed INIT_CALL records.
+	 * Generic dispatch may swap a pending call's func from a generic template
+	 * to a runtime monomorph between INIT and DO_FCALL; such INITs are
+	 * recorded with an unknown callee (NULL) and patched to the actually
+	 * entered function when their ENTER is recorded, so TSSA sees a
+	 * consistent INIT/ENTER pair. A DO_FCALL-family opcode consumes the top
+	 * entry; the ENTER it may cause is detected in the same loop iteration. */
+	int pending_init_idx[256];
+	int pending_init_num = 0;
+	bool pending_init_overflow = false;
+	int entered_init_idx;
 	zend_execute_data *prev_execute_data = ex;
 #ifdef HAVE_GCC_GLOBAL_REGS
 
@@ -799,6 +848,7 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 	}
 
 	if (prev_call) {
+		int fake_from = idx;
 		int ret = zend_jit_trace_record_fake_init_call(prev_call, trace_buffer, idx, is_megamorphic);
 		if (ret < 0) {
 			TRACE_END(ZEND_JIT_TRACE_END, ZEND_JIT_TRACE_STOP_BAD_FUNC, opline);
@@ -809,9 +859,24 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 			return ZEND_JIT_TRACE_STOP_BAD_FUNC;
 		}
 		idx = ret;
+		while (fake_from < idx) {
+			if (pending_init_num < (int)(sizeof(pending_init_idx)/sizeof(int))) {
+				pending_init_idx[pending_init_num++] = fake_from++;
+			} else {
+				pending_init_overflow = true;
+				break;
+			}
+		}
 	}
 
 	while (1) {
+		if (UNEXPECTED(pending_init_overflow)) {
+			/* Too many pending INIT_CALLs to track; without the pairing we
+			 * can't patch swapped generic callees, so give up on this trace. */
+			stop = ZEND_JIT_TRACE_STOP_TOO_DEEP;
+			break;
+		}
+		entered_init_idx = -1;
 		ce1 = ce2 = NULL;
 		op1_type = op2_type = op3_type = IS_UNKNOWN;
 		if ((opline->op1_type & (IS_TMP_VAR|IS_VAR|IS_CV))
@@ -1038,6 +1103,12 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 		 || opline->opcode == ZEND_DO_ICALL
 		 || opline->opcode == ZEND_DO_UCALL
 		 ||	opline->opcode == ZEND_DO_FCALL_BY_NAME) {
+			/* This dispatch consumes the top pending INIT_CALL record. If it
+			 * enters a user function, the ENTER is detected later in this
+			 * same iteration and may patch the record (generic call swap). */
+			if (pending_init_num > 0) {
+				entered_init_idx = pending_init_idx[--pending_init_num];
+			}
 			if (ZEND_CALL_INFO(EX(call)) & ZEND_CALL_MEGAMORPHIC) {
 				stop = ZEND_JIT_TRACE_STOP_INTERPRETER;
 				break;
@@ -1135,6 +1206,27 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 					break;
 				}
 
+				if (entered_init_idx >= 0) {
+					zend_jit_trace_rec *rec = &trace_buffer[entered_init_idx];
+					if (rec->op == ZEND_JIT_TRACE_INIT_CALL
+					 && rec->op_array != op_array) {
+						if (rec->ptr == NULL
+						 && (EX(func)->op_array.fn_flags2 & ZEND_ACC2_MONOMORPH_TYPE_ARGS)) {
+							/* Generic dispatch swapped this call's func from
+							 * the template (recorded as unknown) to a runtime
+							 * monomorph; patch the INIT_CALL record so TSSA
+							 * sees a consistent INIT/ENTER pair. */
+							rec->ptr = op_array;
+						} else if (EX(func)->op_array.fn_flags2 & ZEND_ACC2_MONOMORPH_TYPE_ARGS) {
+							/* Entered a monomorph the INIT didn't predict and
+							 * the record isn't patchable — don't risk an
+							 * inconsistent trace. */
+							stop = ZEND_JIT_TRACE_STOP_INTERPRETER;
+							break;
+						}
+					}
+				}
+
 				TRACE_RECORD(ZEND_JIT_TRACE_ENTER,
 					EX(return_value) != NULL ? ZEND_JIT_TRACE_RETURN_VALUE_USED : 0,
 					op_array);
@@ -1187,12 +1279,21 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 						last_loop_opline = NULL;
 
 						if (prev_call) {
+							int fake_from = idx;
 							int ret = zend_jit_trace_record_fake_init_call(prev_call, trace_buffer, idx, 0);
 							if (ret < 0) {
 								stop = ZEND_JIT_TRACE_STOP_BAD_FUNC;
 								break;
 							}
 							idx = ret;
+							while (fake_from < idx) {
+								if (pending_init_num < (int)(sizeof(pending_init_idx)/sizeof(int))) {
+									pending_init_idx[pending_init_num++] = fake_from++;
+								} else {
+									pending_init_overflow = true;
+									break;
+								}
+							}
 						}
 					} else if (start & ZEND_JIT_TRACE_START_LOOP
 					 && zend_jit_trace_bad_stop_event(orig_opline, JIT_G(blacklist_root_trace) - 1) !=
@@ -1215,12 +1316,21 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 						last_loop_opline = NULL;
 
 						if (prev_call) {
+							int fake_from = idx;
 							int ret = zend_jit_trace_record_fake_init_call(prev_call, trace_buffer, idx, 0);
 							if (ret < 0) {
 								stop = ZEND_JIT_TRACE_STOP_BAD_FUNC;
 								break;
 							}
 							idx = ret;
+							while (fake_from < idx) {
+								if (pending_init_num < (int)(sizeof(pending_init_idx)/sizeof(int))) {
+									pending_init_idx[pending_init_num++] = fake_from++;
+								} else {
+									pending_init_overflow = true;
+									break;
+								}
+							}
 						}
 					} else {
 						stop = ZEND_JIT_TRACE_STOP_RETURN;
@@ -1257,6 +1367,17 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 					} else if (func->op_array.fn_flags & ZEND_ACC_CLOSURE) {
 						func = (zend_function*)jit_extension->op_array;
 					}
+					if (func
+					 && func->op_array.generic_parameters
+					 && !(func->op_array.fn_flags2 & ZEND_ACC2_MONOMORPH_TYPE_ARGS)) {
+						/* Generic template: dispatch may swap call->func to a
+						 * runtime monomorph (a different op_array) before
+						 * DO_FCALL, so the callee recorded here wouldn't match
+						 * the entered frame. Record an unknown callee; the
+						 * ENTER builds the frame from whatever function
+						 * actually runs. */
+						func = NULL;
+					}
 				}
 
 				if (!func
@@ -1277,6 +1398,11 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 				}
 				if (!func) {
 					info = ZEND_JIT_TRACE_NUM_ARGS_INFO(ZEND_CALL_NUM_ARGS(EX(call)));
+				}
+				if (pending_init_num < (int)(sizeof(pending_init_idx)/sizeof(int))) {
+					pending_init_idx[pending_init_num++] = idx;
+				} else {
+					pending_init_overflow = true;
 				}
 				TRACE_RECORD(ZEND_JIT_TRACE_INIT_CALL, info, func);
 			}

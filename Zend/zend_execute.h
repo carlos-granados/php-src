@@ -37,6 +37,13 @@ ZEND_API extern void (*zend_execute_internal)(zend_execute_data *execute_data, z
 /* The lc_name may be stack allocated! */
 ZEND_API extern zend_class_entry *(*zend_autoload)(zend_string *name, zend_string *lc_name);
 
+/* Set by the tracing JIT (opcache) so runtime-synthesized generic monomorphs —
+ * which zend_jit_op_array never sees, since they don't exist at script load —
+ * can get per-monomorph hot-trace counters installed on their own (detached)
+ * opcode buffer. NULL when the JIT is unavailable or not in tracing mode;
+ * monomorph synthesis only detaches its opcodes when this hook is set. */
+ZEND_API extern void (*zend_jit_op_array_runtime_setup)(zend_op_array *op_array);
+
 void init_executor(void);
 void shutdown_executor(void);
 void shutdown_destructors(void);

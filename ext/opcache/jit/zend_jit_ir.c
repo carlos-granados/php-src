@@ -8737,11 +8737,48 @@ static int zend_jit_push_call_frame(zend_jit_ctx *jit, const zend_op *opline, co
 	// JIT: ZEND_CALL_NUM_ARGS(call) = num_args;
 	ir_STORE(jit_CALL(rx, This.u2.num_args), ir_CONST_U32(opline->extended_value));
 
-	// JIT: call->type_args = NULL;
-	// Mirrors zend_vm_init_call_frame; without this the field is stack
-	// garbage and zend_vm_stack_free_call_frame_ex dereferences it on
-	// frame teardown (segfault on the exception / undef-prop path).
-	ir_STORE(jit_CALL(rx, type_args), IR_NULL);
+	// JIT: call->type_args = NULL / closure->captured_type_args / monomorph
+	//      table — mirrors the three cases of zend_vm_init_call_frame.
+	//      Without a store the field is stack garbage and
+	//      zend_vm_stack_free_call_frame_ex dereferences it on frame
+	//      teardown; without the closure/monomorph cases the callee's
+	//      captured or concrete T-bindings are silently dropped.
+	if (is_closure) {
+		// JIT: call->type_args = closure->captured_type_args;
+		ir_STORE(jit_CALL(rx, type_args),
+			ir_LOAD_A(ir_ADD_OFFSET(func_ref, offsetof(zend_closure, captured_type_args))));
+	} else if (func) {
+		if (func->type == ZEND_USER_FUNCTION
+		 && (func->op_array.fn_flags2 & ZEND_ACC2_MONOMORPH_TYPE_ARGS)) {
+			/* Runtime function monomorph reached by name: bind its concrete
+			 * type-arg table. The table is request-local (arena), but so are
+			 * the monomorph's opcodes, and zend_jit_func_guard pins those —
+			 * a stale trace in a later request side-exits before this store. */
+			ir_STORE(jit_CALL(rx, type_args),
+				ir_CONST_ADDR(func->op_array.generic_types->monomorph_type_args));
+		} else if (func->common.fn_flags & ZEND_ACC_CLOSURE) {
+			// JIT: call->type_args = ZEND_CLOSURE_OBJECT(func)->captured_type_args;
+			ir_STORE(jit_CALL(rx, type_args),
+				ir_LOAD_A(ir_ADD_OFFSET(func_ref,
+					(int32_t)offsetof(zend_closure, captured_type_args) - (int32_t)offsetof(zend_closure, func))));
+		} else {
+			ir_STORE(jit_CALL(rx, type_args), IR_NULL);
+		}
+	} else {
+		// JIT: call->type_args = (func->common.fn_flags2 & ZEND_ACC2_MONOMORPH_TYPE_ARGS)
+		//          ? func->op_array.generic_types->monomorph_type_args : NULL;
+		// fn_flags2 lives in the common substruct (zeroed for internal
+		// functions), so the unguarded load is safe for any callee.
+		ir_ref if_mono = ir_IF(ir_AND_U32(
+			ir_LOAD_U32(ir_ADD_OFFSET(func_ref, offsetof(zend_function, common.fn_flags2))),
+			ir_CONST_U32(ZEND_ACC2_MONOMORPH_TYPE_ARGS)));
+		ir_IF_TRUE_cold(if_mono);
+		ir_ref mono_ta = ir_LOAD_A(ir_ADD_OFFSET(
+			ir_LOAD_A(ir_ADD_OFFSET(func_ref, offsetof(zend_function, op_array.generic_types))),
+			offsetof(zend_generic_type_table, monomorph_type_args)));
+		ir_MERGE_WITH_EMPTY_FALSE(if_mono);
+		ir_STORE(jit_CALL(rx, type_args), ir_PHI_2(IR_ADDR, mono_ta, IR_NULL));
+	}
 
 	return 1;
 }
@@ -11048,6 +11085,11 @@ static int zend_jit_free_type_args(zend_jit_ctx *jit)
 	ir_ref if_ta = ir_IF(ta);
 	ir_IF_TRUE_cold(if_ta);
 	ir_CALL_1(IR_VOID, ir_CONST_FC_FUNC(zend_type_arg_table_destroy), ta);
+	/* Clear the field like the interpreter teardown does: later leave-path
+	 * code (helpers, zend_vm_stack_free_call_frame_ex) re-reads it, and a
+	 * stale pointer to a borrowed table freed by the closure dtor is a
+	 * use-after-free. */
+	ir_STORE(jit_EX(type_args), IR_NULL);
 	ir_MERGE_WITH_EMPTY_FALSE(if_ta);
 	return 1;
 }
