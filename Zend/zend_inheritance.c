@@ -8303,6 +8303,16 @@ ZEND_API zend_function *zend_synthesize_function_monomorph(
 		}
 	}
 
+	/* An unpersisted monomorph owns its arena arg_info block's refcounted
+	 * contents (names/doc_comments addref'd, types copy_ctor'd in
+	 * zend_monomorph_build_arg_info); mark it so destroy_op_array releases
+	 * them. Never set on the persisted copy: its arg_info lives in SHM, and a
+	 * closure memcpy clears IMMUTABLE — the flag would let the release block
+	 * write to shared memory. */
+	if (new_arg_info && mono_fn == (zend_function *) mono) {
+		mono->fn_flags2 |= ZEND_ACC2_GENERIC_ARGINFO_CLONE;
+	}
+
 	/* Allocate the runtime cache now: the call swaps to this op_array before
 	 * DO_FCALL, whose hot path reads RUN_TIME_CACHE without lazy allocation.
 	 * (For a persisted monomorph this fills the per-request map-ptr slot.) */

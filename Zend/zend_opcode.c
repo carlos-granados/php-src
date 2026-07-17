@@ -993,11 +993,14 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 		for (uint32_t i = 0; i < num_args; i++) {
 			if (arg_info[i].name) {
 				zend_string_release_ex(arg_info[i].name, 0);
+				arg_info[i].name = NULL;
 			}
 			if (arg_info[i].doc_comment) {
 				zend_string_release_ex(arg_info[i].doc_comment, 0);
+				arg_info[i].doc_comment = NULL;
 			}
 			zend_type_release(arg_info[i].type, /* persistent */ false);
+			arg_info[i].type = (zend_type) ZEND_TYPE_INIT_NONE(0);
 		}
 		op_array->arg_info = NULL;
 	}

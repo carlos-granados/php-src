@@ -1,12 +1,5 @@
 --TEST--
 JIT (function mode): generic calls and monomorph instanceof in a hot loop remain correct
---XFAIL--
-Known Phase-5 JIT bug: function-mode JIT mis-compiles some generic function
-calls with concrete turbofish into a by-name lookup of the function-monomorph
-name (e.g. "unwrap<int>"), which does not exist as a named function (function
-monomorphs are per-frame), raising "Call to undefined function unwrap<int>()".
-Tracing JIT and the interpreter handle the same code correctly. Belongs to the
-JIT-for-generics workstream (Phase 5).
 --EXTENSIONS--
 opcache
 --INI--

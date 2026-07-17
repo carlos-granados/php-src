@@ -798,6 +798,11 @@ static void zend_create_closure_ex(zval *res, zend_function *func, zend_class_en
 		memcpy(&closure->func, func, sizeof(zend_op_array));
 		closure->func.common.fn_flags |= ZEND_ACC_CLOSURE;
 		closure->func.common.fn_flags &= ~ZEND_ACC_IMMUTABLE;
+		/* A generic clone's private arg_info is owned by the source function
+		 * (class table / EG(function_table) monomorph), which outlives any
+		 * closure over it; the copy merely borrows it, so it must not carry
+		 * the flag that makes destroy_op_array release the shared contents. */
+		closure->func.common.fn_flags2 &= ~ZEND_ACC2_GENERIC_ARGINFO_CLONE;
 
 		zend_string_addref(closure->func.op_array.function_name);
 		if (closure->func.op_array.refcount) {

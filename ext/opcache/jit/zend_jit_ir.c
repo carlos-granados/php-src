@@ -2164,6 +2164,12 @@ static int zend_jit_invalid_this_stub(zend_jit_ctx *jit)
 
 static int zend_jit_undefined_function_stub(zend_jit_ctx *jit)
 {
+	/* The find-func helpers may synthesize a generic monomorph on lookup
+	 * miss, which can throw (e.g. a runtime bound violation); in that case
+	 * the function is genuinely "not found" but the pending exception is
+	 * the real error — don't stack an undefined-function Error on top. */
+	ir_GUARD_NOT(ir_LOAD_A(jit_EG(exception)), jit_STUB_ADDR(jit, jit_stub_exception_handler));
+
 	// JIT: load EX(opline)
 	ir_ref ref = ir_LOAD_A(jit_FP(jit));
 	ir_ref arg3 = ir_LOAD_U32(ir_ADD_OFFSET(ref, offsetof(zend_op, op2.constant)));
@@ -8815,6 +8821,24 @@ static int zend_jit_func_guard(zend_jit_ctx *jit, ir_ref func_ref, const zend_fu
 	return 1;
 }
 
+/* A generic callee (or a substituted clone sharing the template's opcode
+ * buffer) may be swapped to a runtime monomorph by VERIFY_GENERIC_ARGUMENTS.
+ * Specializing a call site against the compile-time callee would bake
+ * erased-signature assumptions (entering past RECV type checks, direct-call
+ * fast paths keyed on the template) that the swapped-in monomorph must
+ * instead enforce — treat such callees as unknown. Mirrors the op_array
+ * compile skip in zend_jit_op_array(). */
+static bool zend_jit_callee_may_be_swapped(const zend_function *func)
+{
+	if (func->type != ZEND_USER_FUNCTION) {
+		return false;
+	}
+	return func->op_array.generic_parameters
+		|| func->op_array.generic_types
+		|| (func->common.fn_flags2 & (ZEND_ACC2_MONOMORPH_TYPE_ARGS | ZEND_ACC2_GENERIC_ARGINFO_CLONE))
+		|| (func->common.scope && func->common.scope->generic_parameters);
+}
+
 static int zend_jit_init_fcall_guard(zend_jit_ctx *jit, uint32_t level, const zend_function *func, const zend_op *to_opline)
 {
 	int32_t exit_point;
@@ -8862,7 +8886,8 @@ static int zend_jit_init_fcall(zend_jit_ctx *jit, const zend_op *opline, uint32_
 		while (call_info && call_info->caller_init_opline != opline) {
 			call_info = call_info->next_callee;
 		}
-		if (call_info && call_info->callee_func && !call_info->is_prototype) {
+		if (call_info && call_info->callee_func && !call_info->is_prototype
+				&& !zend_jit_callee_may_be_swapped(call_info->callee_func)) {
 			func = call_info->callee_func;
 		}
 	}
@@ -8923,6 +8948,10 @@ static int zend_jit_init_fcall(zend_jit_ctx *jit, const zend_op *opline, uint32_
 		} else {
 			zval *zv = RT_CONSTANT(opline, opline->op2);
 
+			/* The find-func helpers may synthesize a generic monomorph on
+			 * lookup miss, which can throw — EX(opline) must be current
+			 * before the call (the VM handler SAVE_OPLINEs likewise). */
+			jit_SET_EX_OPLINE(jit, opline);
 			if (opline->opcode == ZEND_INIT_FCALL) {
 				ref = ir_CALL_2(IR_ADDR, ir_CONST_FC_FUNC(zend_jit_find_func_helper),
 					ir_CONST_ADDR(Z_STR_P(zv)),
@@ -8952,7 +8981,6 @@ static int zend_jit_init_fcall(zend_jit_ctx *jit, const zend_op *opline, uint32_
 					return 0;
 				}
 			} else {
-jit_SET_EX_OPLINE(jit, opline);
 				ir_GUARD(ref, jit_STUB_ADDR(jit, jit_stub_undefined_function));
 			}
 		}
@@ -9021,7 +9049,8 @@ static int zend_jit_init_method_call(zend_jit_ctx         *jit,
 		while (call_info && call_info->caller_init_opline != opline) {
 			call_info = call_info->next_callee;
 		}
-		if (call_info && call_info->callee_func && !call_info->is_prototype) {
+		if (call_info && call_info->callee_func && !call_info->is_prototype
+				&& !zend_jit_callee_may_be_swapped(call_info->callee_func)) {
 			func = call_info->callee_func;
 		}
 	}
@@ -9272,7 +9301,8 @@ static int zend_jit_init_static_method_call(zend_jit_ctx         *jit,
 		while (call_info && call_info->caller_init_opline != opline) {
 			call_info = call_info->next_callee;
 		}
-		if (call_info && call_info->callee_func && !call_info->is_prototype) {
+		if (call_info && call_info->callee_func && !call_info->is_prototype
+				&& !zend_jit_callee_may_be_swapped(call_info->callee_func)) {
 			func = call_info->callee_func;
 		}
 	}
@@ -10096,7 +10126,8 @@ static int zend_jit_do_fcall(zend_jit_ctx *jit, const zend_op *opline, const zen
 		while (call_info && call_info->caller_call_opline != opline) {
 			call_info = call_info->next_callee;
 		}
-		if (call_info && call_info->callee_func && !call_info->is_prototype) {
+		if (call_info && call_info->callee_func && !call_info->is_prototype
+				&& !zend_jit_callee_may_be_swapped(call_info->callee_func)) {
 			func = call_info->callee_func;
 		}
 		if ((op_array->fn_flags & ZEND_ACC_TRAIT_CLONE)

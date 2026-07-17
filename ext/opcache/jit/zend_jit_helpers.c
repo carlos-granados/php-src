@@ -57,7 +57,13 @@ static zend_function* ZEND_FASTCALL zend_jit_find_func_helper(zend_string *name,
 	zend_function *fbc;
 
 	if (UNEXPECTED(func == NULL)) {
-		return NULL;
+		/* Mangled monomorph name: synthesize on first reference, mirroring
+		 * the ZEND_INIT_FCALL_BY_NAME handler. */
+		fbc = zend_resolve_monomorph_by_name(name);
+		if (fbc) {
+			*cache_slot = fbc;
+		}
+		return fbc;
 	}
 	fbc = Z_FUNC_P(func);
 	if (EXPECTED(fbc->type == ZEND_USER_FUNCTION) && UNEXPECTED(!RUN_TIME_CACHE(&fbc->op_array))) {
@@ -83,7 +89,16 @@ static zend_function* ZEND_FASTCALL zend_jit_find_ns_func_helper(zval *func_name
 	if (func == NULL) {
 		func = zend_hash_find_known_hash(EG(function_table), Z_STR_P(func_name + 2));
 		if (UNEXPECTED(func == NULL)) {
-			return NULL;
+			/* Mangled monomorph name: try the namespaced then the global
+			 * form, mirroring ZEND_INIT_NS_FCALL_BY_NAME. */
+			zend_function *mono = zend_resolve_monomorph_by_name(Z_STR_P(func_name + 1));
+			if (!mono && !EG(exception)) {
+				mono = zend_resolve_monomorph_by_name(Z_STR_P(func_name + 2));
+			}
+			if (mono) {
+				*cache_slot = mono;
+			}
+			return mono;
 		}
 	}
 	fbc = Z_FUNC_P(func);
