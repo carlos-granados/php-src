@@ -968,7 +968,19 @@ void zend_closure_from_frame(zval *return_value, const zend_execute_data *call) 
 	zend_function *mptr = call->func;
 
 	if (ZEND_CALL_INFO(call) & ZEND_CALL_CLOSURE) {
-		RETURN_OBJ(ZEND_CLOSURE_OBJECT(mptr));
+		zend_closure *source = (zend_closure *) ZEND_CLOSURE_OBJECT(mptr);
+		if (UNEXPECTED(call->type_args != NULL)) {
+			/* Turbofish first-class callable over an existing closure value
+			 * ($c::<int>(...)): bind the frame's resolved type-arg table onto
+			 * a fresh closure; the source closure keeps its own (possibly
+			 * absent) bindings. Mirrors zend_closure_clone. */
+			zend_create_closure(return_value, &source->func,
+				source->func.common.scope, source->called_scope, &source->this_ptr);
+			zend_closure_capture_type_args(return_value, call->type_args);
+			OBJ_RELEASE(&source->std); /* the pending frame's reference */
+			return;
+		}
+		RETURN_OBJ(&source->std);
 	}
 
 	if (mptr->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE) {
