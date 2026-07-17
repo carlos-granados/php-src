@@ -159,7 +159,16 @@ void zend_optimizer_compact_literals(zend_op_array *op_array, zend_optimizer_ctx
 					LITERAL_INFO(opline->op1.constant, 1);
 					break;
 				case ZEND_CATCH:
-					LITERAL_INFO(opline->op1.constant, 2);
+					/* A T-ref / deferred-turbofish catch (`catch (Box<T> $e)`)
+					 * compiles op1 as IS_UNUSED with op1.num holding a packed
+					 * type-param/deferred-fetch descriptor, not a literal
+					 * table index -- op1.constant must not be touched in that
+					 * case (see the matching IS_CONST guard on the ZEND_CATCH
+					 * case further down in this file, in the slot-remapping
+					 * pass, which already handles both forms correctly). */
+					if (opline->op1_type == IS_CONST) {
+						LITERAL_INFO(opline->op1.constant, 2);
+					}
 					break;
 				case ZEND_FETCH_CONSTANT:
 					if (opline->op1.num & IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE) {
