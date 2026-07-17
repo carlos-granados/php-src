@@ -6420,8 +6420,19 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 					}
 					zend_string_release(ce->trait_names[i].name);
 					zend_string_release(ce->trait_names[i].lc_name);
-					ce->trait_names[i].name = zend_string_copy(mono->name);
-					ce->trait_names[i].lc_name = zend_string_tolower(mono->name);
+					/* Interned rather than plain heap-owned: a CACHED-but-not-
+					 * IMMUTABLE ce (deferred/DELAYED_BINDING linking under
+					 * opcache.file_cache) may itself already be a persisted
+					 * structure whose interface_names/trait_names array lives
+					 * in non-heap (e.g. arena-backed) memory that must never
+					 * be efree'd — the normal per-request release path that
+					 * frees these entries is skipped for CACHED classes for
+					 * exactly that reason. Interned strings sidestep the
+					 * problem entirely: release is a no-op, so there is
+					 * nothing to leak regardless of how the owning array is
+					 * torn down. */
+					ce->trait_names[i].name = zend_new_interned_string(zend_string_copy(mono->name));
+					ce->trait_names[i].lc_name = zend_new_interned_string(zend_string_tolower(mono->name));
 				}
 			}
 
@@ -6534,8 +6545,10 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 					}
 					zend_string_release(ce->interface_names[i].name);
 					zend_string_release(ce->interface_names[i].lc_name);
-					ce->interface_names[i].name = zend_string_copy(mono->name);
-					ce->interface_names[i].lc_name = zend_string_tolower(mono->name);
+					/* Interned, not plain heap-owned: see the identical
+					 * rationale on the trait_names rewrite above. */
+					ce->interface_names[i].name = zend_new_interned_string(zend_string_copy(mono->name));
+					ce->interface_names[i].lc_name = zend_new_interned_string(zend_string_tolower(mono->name));
 				}
 			}
 
