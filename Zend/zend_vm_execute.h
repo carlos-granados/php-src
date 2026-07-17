@@ -22366,6 +22366,29 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_VERIFY_GENERI
 {
 	USE_OPLINE
 	zend_execute_data *call = EX(call);
+
+	SAVE_OPLINE();
+
+	/* Hottest possible path: a speculative call site (no turbofish AST was
+	 * ever compiled here, extended_value == 0) whose resolved callee isn't
+	 * generic has nothing to verify. This isn't a generics-only concern —
+	 * virtually every polymorphic method call in ANY PHP program reaches
+	 * this opcode speculatively, since the compiler cannot know the exact
+	 * callee for a non-final/non-private method call ahead of time (see
+	 * zend_compile_method_call's fbc resolution). When extended_value == 0,
+	 * tf_entry is unconditionally NULL (the ternary below short-circuits
+	 * without a lookup) and therefore so is args_box — so this early check
+	 * is exactly equivalent to the `args_box == NULL` fast path a few lines
+	 * down, reached without computing arity/cache_slot/tf_entry/args_box
+	 * first. Purely additive: falls through to the unchanged original logic
+	 * (including its own args_box == NULL check) whenever extended_value is
+	 * nonzero. */
+	if (IS_TMP_VAR == IS_UNUSED && opline->extended_value == 0
+			&& (!ZEND_USER_CODE(call->func->type)
+				|| !call->func->op_array.generic_parameters)) {
+		ZEND_VM_NEXT_OPCODE();
+	}
+
 	uint32_t arity = opline->op2.num;
 	void **cache_slot = opline->result.num ? CACHE_ADDR(opline->result.num) : NULL;
 	/* Skip the entry lookup for speculative sites (args_id == 0). */
@@ -22376,8 +22399,6 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_VERIFY_GENERI
 	const zend_type *args_box = (IS_TMP_VAR == IS_UNUSED)
 		? (tf_entry ? &tf_entry->args_box : NULL)
 		: zend_generic_get_or_cache_args_box(&EX(func)->op_array, opline->extended_value, cache_slot);
-
-	SAVE_OPLINE();
 
 	if (IS_TMP_VAR == IS_UNUSED) {
 		/* Erased fast path: non-generic speculative site, nothing to verify. */
@@ -38160,6 +38181,29 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_VERIFY_GENERI
 {
 	USE_OPLINE
 	zend_execute_data *call = EX(call);
+
+	SAVE_OPLINE();
+
+	/* Hottest possible path: a speculative call site (no turbofish AST was
+	 * ever compiled here, extended_value == 0) whose resolved callee isn't
+	 * generic has nothing to verify. This isn't a generics-only concern —
+	 * virtually every polymorphic method call in ANY PHP program reaches
+	 * this opcode speculatively, since the compiler cannot know the exact
+	 * callee for a non-final/non-private method call ahead of time (see
+	 * zend_compile_method_call's fbc resolution). When extended_value == 0,
+	 * tf_entry is unconditionally NULL (the ternary below short-circuits
+	 * without a lookup) and therefore so is args_box — so this early check
+	 * is exactly equivalent to the `args_box == NULL` fast path a few lines
+	 * down, reached without computing arity/cache_slot/tf_entry/args_box
+	 * first. Purely additive: falls through to the unchanged original logic
+	 * (including its own args_box == NULL check) whenever extended_value is
+	 * nonzero. */
+	if (IS_UNUSED == IS_UNUSED && opline->extended_value == 0
+			&& (!ZEND_USER_CODE(call->func->type)
+				|| !call->func->op_array.generic_parameters)) {
+		ZEND_VM_NEXT_OPCODE();
+	}
+
 	uint32_t arity = opline->op2.num;
 	void **cache_slot = opline->result.num ? CACHE_ADDR(opline->result.num) : NULL;
 	/* Skip the entry lookup for speculative sites (args_id == 0). */
@@ -38170,8 +38214,6 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_VERIFY_GENERI
 	const zend_type *args_box = (IS_UNUSED == IS_UNUSED)
 		? (tf_entry ? &tf_entry->args_box : NULL)
 		: zend_generic_get_or_cache_args_box(&EX(func)->op_array, opline->extended_value, cache_slot);
-
-	SAVE_OPLINE();
 
 	if (IS_UNUSED == IS_UNUSED) {
 		/* Erased fast path: non-generic speculative site, nothing to verify. */
@@ -76028,6 +76070,29 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_VERIFY_GENERIC_ARG
 {
 	USE_OPLINE
 	zend_execute_data *call = EX(call);
+
+	SAVE_OPLINE();
+
+	/* Hottest possible path: a speculative call site (no turbofish AST was
+	 * ever compiled here, extended_value == 0) whose resolved callee isn't
+	 * generic has nothing to verify. This isn't a generics-only concern —
+	 * virtually every polymorphic method call in ANY PHP program reaches
+	 * this opcode speculatively, since the compiler cannot know the exact
+	 * callee for a non-final/non-private method call ahead of time (see
+	 * zend_compile_method_call's fbc resolution). When extended_value == 0,
+	 * tf_entry is unconditionally NULL (the ternary below short-circuits
+	 * without a lookup) and therefore so is args_box — so this early check
+	 * is exactly equivalent to the `args_box == NULL` fast path a few lines
+	 * down, reached without computing arity/cache_slot/tf_entry/args_box
+	 * first. Purely additive: falls through to the unchanged original logic
+	 * (including its own args_box == NULL check) whenever extended_value is
+	 * nonzero. */
+	if (IS_TMP_VAR == IS_UNUSED && opline->extended_value == 0
+			&& (!ZEND_USER_CODE(call->func->type)
+				|| !call->func->op_array.generic_parameters)) {
+		ZEND_VM_NEXT_OPCODE();
+	}
+
 	uint32_t arity = opline->op2.num;
 	void **cache_slot = opline->result.num ? CACHE_ADDR(opline->result.num) : NULL;
 	/* Skip the entry lookup for speculative sites (args_id == 0). */
@@ -76038,8 +76103,6 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_VERIFY_GENERIC_ARG
 	const zend_type *args_box = (IS_TMP_VAR == IS_UNUSED)
 		? (tf_entry ? &tf_entry->args_box : NULL)
 		: zend_generic_get_or_cache_args_box(&EX(func)->op_array, opline->extended_value, cache_slot);
-
-	SAVE_OPLINE();
 
 	if (IS_TMP_VAR == IS_UNUSED) {
 		/* Erased fast path: non-generic speculative site, nothing to verify. */
@@ -91822,6 +91885,29 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_VERIFY_GENERIC_ARG
 {
 	USE_OPLINE
 	zend_execute_data *call = EX(call);
+
+	SAVE_OPLINE();
+
+	/* Hottest possible path: a speculative call site (no turbofish AST was
+	 * ever compiled here, extended_value == 0) whose resolved callee isn't
+	 * generic has nothing to verify. This isn't a generics-only concern —
+	 * virtually every polymorphic method call in ANY PHP program reaches
+	 * this opcode speculatively, since the compiler cannot know the exact
+	 * callee for a non-final/non-private method call ahead of time (see
+	 * zend_compile_method_call's fbc resolution). When extended_value == 0,
+	 * tf_entry is unconditionally NULL (the ternary below short-circuits
+	 * without a lookup) and therefore so is args_box — so this early check
+	 * is exactly equivalent to the `args_box == NULL` fast path a few lines
+	 * down, reached without computing arity/cache_slot/tf_entry/args_box
+	 * first. Purely additive: falls through to the unchanged original logic
+	 * (including its own args_box == NULL check) whenever extended_value is
+	 * nonzero. */
+	if (IS_UNUSED == IS_UNUSED && opline->extended_value == 0
+			&& (!ZEND_USER_CODE(call->func->type)
+				|| !call->func->op_array.generic_parameters)) {
+		ZEND_VM_NEXT_OPCODE();
+	}
+
 	uint32_t arity = opline->op2.num;
 	void **cache_slot = opline->result.num ? CACHE_ADDR(opline->result.num) : NULL;
 	/* Skip the entry lookup for speculative sites (args_id == 0). */
@@ -91832,8 +91918,6 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_VERIFY_GENERIC_ARG
 	const zend_type *args_box = (IS_UNUSED == IS_UNUSED)
 		? (tf_entry ? &tf_entry->args_box : NULL)
 		: zend_generic_get_or_cache_args_box(&EX(func)->op_array, opline->extended_value, cache_slot);
-
-	SAVE_OPLINE();
 
 	if (IS_UNUSED == IS_UNUSED) {
 		/* Erased fast path: non-generic speculative site, nothing to verify. */
