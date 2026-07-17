@@ -177,7 +177,7 @@ class Foo { public int $tag = 0; }
 function makeGen<T = Foo>(T $x): T { return $x; }
 function makeNonGen(Foo $x): Foo { return $x; }
 
-function infer_call(int $n): void {
+function default_call(int $n): void {
     $f = new Foo();
     for ($i = 0; $i < $n; $i++) {
         makeGen($f);
@@ -203,7 +203,7 @@ class Bar { public int $tag = 0; }
 function makeTwoGen<T = Foo, U = Bar>(T $x, U $y): T { return $x; }
 function makeTwoNonGen(Foo $x, Bar $y): Foo { return $x; }
 
-function infer_two(int $n): void {
+function default_two(int $n): void {
     $f = new Foo();
     $b = new Bar();
     for ($i = 0; $i < $n; $i++) {
@@ -230,7 +230,7 @@ function plain_two(int $n): void {
 // --------------------------------------------------------------------------
 function makeBounded<T : object = Foo>(T $x): T { return $x; }
 
-function infer_bounded(int $n): void {
+function default_bounded(int $n): void {
     $f = new Foo();
     for ($i = 0; $i < $n; $i++) {
         makeBounded($f);
@@ -383,25 +383,25 @@ $tbox_isT_ns  = bench("TBox<Marker>->isT()",     'tbox_isT');
 $plain_isT_ns = bench("\$x instanceof Marker direct", 'plain_isT');
 compare("delta: instanceof T         vs instanceof Marker", $tbox_isT_ns, "T", $plain_isT_ns, "direct");
 
-section("5. Inference vs turbofish vs non-generic call");
-$infer_ns    = bench("makeGen(\$x)  — defaults",        'infer_call');
+section("5. Defaults vs turbofish vs non-generic call");
+$default_ns    = bench("makeGen(\$x)  — defaults",        'default_call');
 $turbo_ns    = bench("makeGen::<Foo>(\$x) — turbofish", 'turbofish_call');
 $plain_fn_ns = bench("makeNonGen(\$x) — no generics",   'plain_call');
-compare("delta: defaults             vs plain", $infer_ns, "def", $plain_fn_ns, "plain");
+compare("delta: defaults             vs plain", $default_ns, "def", $plain_fn_ns, "plain");
 compare("delta: turbofish            vs plain", $turbo_ns, "turbo", $plain_fn_ns, "plain");
-compare("delta: defaults             vs turbofish", $infer_ns, "def", $turbo_ns, "turbo");
+compare("delta: defaults             vs turbofish", $default_ns, "def", $turbo_ns, "turbo");
 
 section("6. Multi-parameter defaults");
-$infer2_ns = bench("makeTwoGen(\$f,\$b)  — default T,U", 'infer_two');
+$default2_ns = bench("makeTwoGen(\$f,\$b)  — default T,U", 'default_two');
 $turbo2_ns = bench("makeTwoGen::<Foo,Bar>  — turbofish", 'turbofish_two');
 $plain2_ns = bench("makeTwoNonGen(\$f,\$b)",             'plain_two');
-compare("delta: infer T,U            vs plain", $infer2_ns, "infer2", $plain2_ns, "plain");
+compare("delta: default T,U            vs plain", $default2_ns, "default2", $plain2_ns, "plain");
 compare("delta: turbofish T,U        vs plain", $turbo2_ns, "turbo2", $plain2_ns, "plain");
 
-section("7. Inference + bound check");
-$infer_bd_ns = bench("makeBounded(\$x) — defaults + bound", 'infer_bounded');
+section("7. Defaults + bound check");
+$default_bd_ns = bench("makeBounded(\$x) — defaults + bound", 'default_bounded');
 $turbo_bd_ns = bench("makeBounded::<Foo>(\$x) — turbo+bd", 'turbofish_bounded');
-compare("delta: infer+bound          vs infer (no bound)", $infer_bd_ns, "ibnd", $infer_ns,  "infer");
+compare("delta: default+bound          vs default (no bound)", $default_bd_ns, "ibnd", $default_ns,  "default");
 compare("delta: turbo+bound          vs turbo (no bound)", $turbo_bd_ns, "tbnd", $turbo_ns, "turbo");
 
 section("8. Reified arg-type coercion");
@@ -605,11 +605,11 @@ compare("delta: deep d4              vs deep d1", $p_d4_ns, "d4", $p_d1_ns, "d1"
 // --------------------------------------------------------------------------
 function id_gen<T = mixed>(T $x): T { return $x; }
 
-function bench_infer_d1(int $n): void {
+function bench_default_d1(int $n): void {
     $v = new DBox::<int>();
     for ($i = 0; $i < $n; $i++) { id_gen($v); }
 }
-function bench_infer_d3(int $n): void {
+function bench_default_d3(int $n): void {
     $v = new DBox::<L2<L3<int>>>();
     for ($i = 0; $i < $n; $i++) { id_gen($v); }
 }
@@ -623,8 +623,8 @@ function bench_plain_pass(int $n): void {
 }
 
 section("16. Defaults / turbofish with deep value");
-$inf1_ns = bench("id(DBox<int>)                  — defaults",             'bench_infer_d1');
-$inf3_ns = bench("id(DBox<L2<L3<int>>>)          — defaults",             'bench_infer_d3');
+$inf1_ns = bench("id(DBox<int>)                  — defaults",             'bench_default_d1');
+$inf3_ns = bench("id(DBox<L2<L3<int>>>)          — defaults",             'bench_default_d3');
 $tf3_ns  = bench("id::<DBox<L2<L3<int>>>>(\$v)    — turbofish",           'bench_turbofish_d3');
 $plp_ns  = bench("takes_plain(\$plain)            — non-generic ref",     'bench_plain_pass');
 compare("delta: defaults d1          vs plain", $inf1_ns, "defD1", $plp_ns, "plain");
@@ -853,20 +853,20 @@ class Shallow {}
 class Mid extends Shallow {}
 class Deep extends Mid {}
 
-function infer_id<T = mixed>(T $x): T { return $x; }
+function default_id<T = mixed>(T $x): T { return $x; }
 function plain_id(object $x): object { return $x; }
 
-function bench_infer_shallow(int $n): void {
+function bench_default_shallow(int $n): void {
     $v = new Shallow();
-    for ($i = 0; $i < $n; $i++) { infer_id($v); }
+    for ($i = 0; $i < $n; $i++) { default_id($v); }
 }
-function bench_infer_deep_hierarchy(int $n): void {
+function bench_default_deep_hierarchy(int $n): void {
     $v = new Deep();
-    for ($i = 0; $i < $n; $i++) { infer_id($v); }
+    for ($i = 0; $i < $n; $i++) { default_id($v); }
 }
 function bench_turbofish_shallow(int $n): void {
     $v = new Shallow();
-    for ($i = 0; $i < $n; $i++) { infer_id::<Shallow>($v); }
+    for ($i = 0; $i < $n; $i++) { default_id::<Shallow>($v); }
 }
 function bench_plain_object(int $n): void {
     $v = new Shallow();
@@ -881,26 +881,26 @@ class TypeB {}
 class TypeC {}
 class TypeD {}
 
-function infer_two_params<T = mixed, U = mixed>(T $a, U $b): T { return $a; }
-function infer_three_params<T = mixed, U = mixed, V = mixed>(T $a, U $b, V $c): T { return $a; }
-function infer_four_params<T = mixed, U = mixed, V = mixed, W = mixed>(T $a, U $b, V $c, W $d): T { return $a; }
+function default_two_params<T = mixed, U = mixed>(T $a, U $b): T { return $a; }
+function default_three_params<T = mixed, U = mixed, V = mixed>(T $a, U $b, V $c): T { return $a; }
+function default_four_params<T = mixed, U = mixed, V = mixed, W = mixed>(T $a, U $b, V $c, W $d): T { return $a; }
 function plain_four_params(TypeA $a, TypeB $b, TypeC $c, TypeD $d): TypeA { return $a; }
 
-function bench_infer_2param(int $n): void {
+function bench_default_2param(int $n): void {
     $a = new TypeA(); $b = new TypeB();
-    for ($i = 0; $i < $n; $i++) { infer_two_params($a, $b); }
+    for ($i = 0; $i < $n; $i++) { default_two_params($a, $b); }
 }
-function bench_infer_3param(int $n): void {
+function bench_default_3param(int $n): void {
     $a = new TypeA(); $b = new TypeB(); $c = new TypeC();
-    for ($i = 0; $i < $n; $i++) { infer_three_params($a, $b, $c); }
+    for ($i = 0; $i < $n; $i++) { default_three_params($a, $b, $c); }
 }
-function bench_infer_4param(int $n): void {
+function bench_default_4param(int $n): void {
     $a = new TypeA(); $b = new TypeB(); $c = new TypeC(); $d = new TypeD();
-    for ($i = 0; $i < $n; $i++) { infer_four_params($a, $b, $c, $d); }
+    for ($i = 0; $i < $n; $i++) { default_four_params($a, $b, $c, $d); }
 }
 function bench_turbofish_4param(int $n): void {
     $a = new TypeA(); $b = new TypeB(); $c = new TypeC(); $d = new TypeD();
-    for ($i = 0; $i < $n; $i++) { infer_four_params::<TypeA, TypeB, TypeC, TypeD>($a, $b, $c, $d); }
+    for ($i = 0; $i < $n; $i++) { default_four_params::<TypeA, TypeB, TypeC, TypeD>($a, $b, $c, $d); }
 }
 function bench_plain_4param(int $n): void {
     $a = new TypeA(); $b = new TypeB(); $c = new TypeC(); $d = new TypeD();
@@ -920,23 +920,23 @@ class GenMid<T> extends GenBase<T> {}
 class GenChild<T> extends GenMid<T> {}
 class GenGrandchild<T> extends GenChild<T> {}
 
-function infer_from_chain<T = mixed>(T $x): T { return $x; }
+function default_from_chain<T = mixed>(T $x): T { return $x; }
 
-function bench_infer_chain_d1(int $n): void {
+function bench_default_chain_d1(int $n): void {
     $v = new GenBase::<int>();
-    for ($i = 0; $i < $n; $i++) { infer_from_chain($v); }
+    for ($i = 0; $i < $n; $i++) { default_from_chain($v); }
 }
-function bench_infer_chain_d2(int $n): void {
+function bench_default_chain_d2(int $n): void {
     $v = new GenMid::<int>();
-    for ($i = 0; $i < $n; $i++) { infer_from_chain($v); }
+    for ($i = 0; $i < $n; $i++) { default_from_chain($v); }
 }
-function bench_infer_chain_d3(int $n): void {
+function bench_default_chain_d3(int $n): void {
     $v = new GenChild::<int>();
-    for ($i = 0; $i < $n; $i++) { infer_from_chain($v); }
+    for ($i = 0; $i < $n; $i++) { default_from_chain($v); }
 }
-function bench_infer_chain_d4(int $n): void {
+function bench_default_chain_d4(int $n): void {
     $v = new GenGrandchild::<int>();
-    for ($i = 0; $i < $n; $i++) { infer_from_chain($v); }
+    for ($i = 0; $i < $n; $i++) { default_from_chain($v); }
 }
 
 // --------------------------------------------------------------------------
@@ -945,14 +945,14 @@ function bench_infer_chain_d4(int $n): void {
 // `inner::<U>($x)` forwards the outer binding explicitly (caller-dependent,
 // keyed by the caller-binding fingerprint in the call-site cache).
 // --------------------------------------------------------------------------
-function inner_infer<T = mixed>(T $x): T { return $x; }
-function outer_calls_inferred<U>(U $x): U { return inner_infer($x); }
-function outer_calls_turbofish<U>(U $x): U { return inner_infer::<U>($x); }
+function inner_default<T = mixed>(T $x): T { return $x; }
+function outer_calls_defaulted<U>(U $x): U { return inner_default($x); }
+function outer_calls_turbofish<U>(U $x): U { return inner_default::<U>($x); }
 function outer_plain(Foo $x): Foo { return $x; }
 
-function bench_nested_infer(int $n): void {
+function bench_nested_default(int $n): void {
     $f = new Foo();
-    for ($i = 0; $i < $n; $i++) { outer_calls_inferred::<Foo>($f); }
+    for ($i = 0; $i < $n; $i++) { outer_calls_defaulted::<Foo>($f); }
 }
 function bench_nested_turbofish(int $n): void {
     $f = new Foo();
@@ -973,20 +973,20 @@ class Animal {}
 class Dog extends Animal {}
 class Puppy extends Dog {}
 
-function infer_bounded_obj<T : Animal = Animal>(T $x): T { return $x; }
+function default_bounded_obj<T : Animal = Animal>(T $x): T { return $x; }
 function turbofish_bounded_obj(Animal $x): Animal { return $x; }
 
-function bench_infer_bounded_shallow(int $n): void {
+function bench_default_bounded_shallow(int $n): void {
     $v = new Dog();
-    for ($i = 0; $i < $n; $i++) { infer_bounded_obj($v); }
+    for ($i = 0; $i < $n; $i++) { default_bounded_obj($v); }
 }
-function bench_infer_bounded_deep(int $n): void {
+function bench_default_bounded_deep(int $n): void {
     $v = new Puppy();
-    for ($i = 0; $i < $n; $i++) { infer_bounded_obj($v); }
+    for ($i = 0; $i < $n; $i++) { default_bounded_obj($v); }
 }
 function bench_turbofish_bounded_equiv(int $n): void {
     $v = new Dog();
-    for ($i = 0; $i < $n; $i++) { infer_bounded_obj::<Dog>($v); }
+    for ($i = 0; $i < $n; $i++) { default_bounded_obj::<Dog>($v); }
 }
 function bench_plain_bounded_equiv(int $n): void {
     $v = new Dog();
@@ -999,30 +999,30 @@ function bench_plain_bounded_equiv(int $n): void {
 // (e.g. "GenChild<int>"); dispatch goes through its function table with no
 // chain walking.
 // --------------------------------------------------------------------------
-function bench_infer_mono_receiver_d1(int $n): void {
+function bench_default_mono_receiver_d1(int $n): void {
     $r = new GenBase::<int>();
     $acc = 0;
     for ($i = 0; $i < $n; $i++) { $acc = $r->id($acc); }
 }
-function bench_infer_mono_receiver_d4(int $n): void {
+function bench_default_mono_receiver_d4(int $n): void {
     $r = new GenGrandchild::<int>();
     $acc = 0;
     for ($i = 0; $i < $n; $i++) { $acc = $r->id($acc); }
 }
 
 section("24. Defaults cost isolation");
-$is_ns  = bench("infer_id(\$shallow)          — defaults, flat class",   'bench_infer_shallow');
-$idh_ns = bench("infer_id(\$deep)             — defaults, 3-deep class", 'bench_infer_deep_hierarchy');
-$ts_ns  = bench("infer_id::<Shallow>(\$v)     — turbofish equiv",        'bench_turbofish_shallow');
+$is_ns  = bench("default_id(\$shallow)          — defaults, flat class",   'bench_default_shallow');
+$idh_ns = bench("default_id(\$deep)             — defaults, 3-deep class", 'bench_default_deep_hierarchy');
+$ts_ns  = bench("default_id::<Shallow>(\$v)     — turbofish equiv",        'bench_turbofish_shallow');
 $po_ns  = bench("plain_id(\$v)                — non-generic",            'bench_plain_object');
 compare("delta: defaults               vs turbofish",   $is_ns, "def", $ts_ns, "tf");
 compare("delta: defaults               vs plain",       $is_ns, "def", $po_ns, "plain");
 compare("delta: deep hierarchy class    vs shallow",     $idh_ns, "deep", $is_ns, "shallow");
 
 section("24b. Multi-param defaults scaling");
-$i2_ns  = bench("infer_two_params(\$a,\$b)     — 2 params defaulted",    'bench_infer_2param');
-$i3_ns  = bench("infer_three_params(\$a,\$b,\$c) — 3 params defaulted",  'bench_infer_3param');
-$i4_ns  = bench("infer_four_params(\$a...\$d)  — 4 params defaulted",    'bench_infer_4param');
+$i2_ns  = bench("default_two_params(\$a,\$b)     — 2 params defaulted",    'bench_default_2param');
+$i3_ns  = bench("default_three_params(\$a,\$b,\$c) — 3 params defaulted",  'bench_default_3param');
+$i4_ns  = bench("default_four_params(\$a...\$d)  — 4 params defaulted",    'bench_default_4param');
 $t4_ns  = bench("turbofish::<A,B,C,D>(\$a...) — 4 params turbofish",    'bench_turbofish_4param');
 $p4_ns  = bench("plain_four_params(\$a...\$d)  — non-generic",           'bench_plain_4param');
 compare("delta: 4-param defaults       vs 2-param defaults", $i4_ns, "4p", $i2_ns, "2p");
@@ -1030,15 +1030,15 @@ compare("delta: 4-param defaults       vs 4-param turbo",  $i4_ns, "def", $t4_ns
 compare("delta: 4-param defaults       vs 4-param plain",  $i4_ns, "def", $p4_ns, "plain");
 
 section("25. Defaults with inheritance-chain values");
-$ic1_ns = bench("infer_from_chain(GenBase<int>)       — chain depth 1",  'bench_infer_chain_d1');
-$ic2_ns = bench("infer_from_chain(GenMid<int>)        — chain depth 2",  'bench_infer_chain_d2');
-$ic3_ns = bench("infer_from_chain(GenChild<int>)      — chain depth 3",  'bench_infer_chain_d3');
-$ic4_ns = bench("infer_from_chain(GenGrandchild<int>) — chain depth 4",  'bench_infer_chain_d4');
+$ic1_ns = bench("default_from_chain(GenBase<int>)       — chain depth 1",  'bench_default_chain_d1');
+$ic2_ns = bench("default_from_chain(GenMid<int>)        — chain depth 2",  'bench_default_chain_d2');
+$ic3_ns = bench("default_from_chain(GenChild<int>)      — chain depth 3",  'bench_default_chain_d3');
+$ic4_ns = bench("default_from_chain(GenGrandchild<int>) — chain depth 4",  'bench_default_chain_d4');
 compare("delta: chain d2               vs chain d1",    $ic2_ns, "d2", $ic1_ns, "d1");
 compare("delta: chain d4               vs chain d1",    $ic4_ns, "d4", $ic1_ns, "d1");
 
 section("26. Nested generic call: inner defaults vs forwarding");
-$ni_ns  = bench("outer<Foo> → inner naked              — inner defaults", 'bench_nested_infer');
+$ni_ns  = bench("outer<Foo> → inner naked              — inner defaults", 'bench_nested_default');
 $nt_ns  = bench("outer<Foo> → inner::<U> turbofish     — inner forwarded",'bench_nested_turbofish');
 $np_ns  = bench("outer_plain(\$f)                       — non-generic",   'bench_nested_plain');
 compare("delta: nested defaults         vs nested turbo",  $ni_ns, "def", $nt_ns, "tf");
@@ -1046,17 +1046,17 @@ compare("delta: nested defaults         vs plain",         $ni_ns, "def", $np_ns
 compare("delta: nested turbo            vs plain",         $nt_ns, "tf",  $np_ns, "plain");
 
 section("27. Bounded defaults (covariance check)");
-$ibs_ns = bench("infer_bounded(Dog)          — defaults, shallow value", 'bench_infer_bounded_shallow');
-$ibd_ns = bench("infer_bounded(Puppy)        — defaults, deeper value",  'bench_infer_bounded_deep');
-$tbe_ns = bench("infer_bounded::<Dog>(Dog)   — turbofish+bound",         'bench_turbofish_bounded_equiv');
+$ibs_ns = bench("default_bounded(Dog)          — defaults, shallow value", 'bench_default_bounded_shallow');
+$ibd_ns = bench("default_bounded(Puppy)        — defaults, deeper value",  'bench_default_bounded_deep');
+$tbe_ns = bench("default_bounded::<Dog>(Dog)   — turbofish+bound",         'bench_turbofish_bounded_equiv');
 $pbe_ns = bench("plain_bounded(Dog)          — non-generic typed",       'bench_plain_bounded_equiv');
 compare("delta: defaults+bound          vs turbofish+bound", $ibs_ns, "def", $tbe_ns, "tf");
 compare("delta: defaults+bound          vs plain typed",     $ibs_ns, "def", $pbe_ns, "plain");
 compare("delta: deeper subtype          vs shallow subtype", $ibd_ns, "deep", $ibs_ns, "shallow");
 
 section("28. Method dispatch on monomorphised inheritance chain receiver");
-$mrd1_ns = bench("GenBase<int>->id()           — chain depth 1",         'bench_infer_mono_receiver_d1');
-$mrd4_ns = bench("GenGrandchild<int>->id()     — chain depth 4",         'bench_infer_mono_receiver_d4');
+$mrd1_ns = bench("GenBase<int>->id()           — chain depth 1",         'bench_default_mono_receiver_d1');
+$mrd4_ns = bench("GenGrandchild<int>->id()     — chain depth 4",         'bench_default_mono_receiver_d4');
 compare("delta: chain d4 receiver       vs chain d1",  $mrd4_ns, "d4", $mrd1_ns, "d1");
 
 $opcache_loaded = extension_loaded('Zend OPcache');
