@@ -1028,17 +1028,40 @@ static void zend_file_cache_serialize_class(zval                     *zv,
 
 	if (ce->num_interfaces) {
 		uint32_t i;
-		zend_class_name *interface_names;
 
-		ZEND_ASSERT(!(ce->ce_flags & ZEND_ACC_LINKED));
+		/* Reified-generic interface monomorphs (e.g. `Producer<int>`, the
+		 * class synthesized for a compile-time-resolvable `instanceof
+		 * Producer::<int>` or `catch (Producer<int> $e)`) are already fully
+		 * LINKED by the time they reach file-cache serialization -- unlike
+		 * every other class this function sees, whose linking is always
+		 * deferred past this point. A linked class's interface_names/
+		 * interfaces union field has already been overwritten with the
+		 * resolved zend_class_entry* array (see zend_do_implement_interfaces
+		 * in zend_inheritance.c), so serialize that form instead; mirrors
+		 * the ce->parent/parent_name duality a few lines above, and the
+		 * equivalent branch already present in zend_persist_calc.c (sizing)
+		 * and zend_persist.c's zend_update_parent_ce (SHM persist). */
+		if (!(ce->ce_flags & ZEND_ACC_LINKED)) {
+			zend_class_name *interface_names;
 
-		SERIALIZE_PTR(ce->interface_names);
-		interface_names = ce->interface_names;
-		UNSERIALIZE_PTR(interface_names);
+			SERIALIZE_PTR(ce->interface_names);
+			interface_names = ce->interface_names;
+			UNSERIALIZE_PTR(interface_names);
 
-		for (i = 0; i < ce->num_interfaces; i++) {
-			SERIALIZE_STR(interface_names[i].name);
-			SERIALIZE_STR(interface_names[i].lc_name);
+			for (i = 0; i < ce->num_interfaces; i++) {
+				SERIALIZE_STR(interface_names[i].name);
+				SERIALIZE_STR(interface_names[i].lc_name);
+			}
+		} else {
+			zend_class_entry **interfaces;
+
+			SERIALIZE_PTR(ce->interfaces);
+			interfaces = ce->interfaces;
+			UNSERIALIZE_PTR(interfaces);
+
+			for (i = 0; i < ce->num_interfaces; i++) {
+				SERIALIZE_PTR(interfaces[i]);
+			}
 		}
 	}
 
@@ -2105,12 +2128,20 @@ static void zend_file_cache_unserialize_class(zval                    *zv,
 	if (ce->num_interfaces) {
 		uint32_t i;
 
-		ZEND_ASSERT(!(ce->ce_flags & ZEND_ACC_LINKED));
-		UNSERIALIZE_PTR(ce->interface_names);
+		/* See the matching comment in zend_file_cache_serialize_class. */
+		if (!(ce->ce_flags & ZEND_ACC_LINKED)) {
+			UNSERIALIZE_PTR(ce->interface_names);
 
-		for (i = 0; i < ce->num_interfaces; i++) {
-			UNSERIALIZE_STR(ce->interface_names[i].name);
-			UNSERIALIZE_STR(ce->interface_names[i].lc_name);
+			for (i = 0; i < ce->num_interfaces; i++) {
+				UNSERIALIZE_STR(ce->interface_names[i].name);
+				UNSERIALIZE_STR(ce->interface_names[i].lc_name);
+			}
+		} else {
+			UNSERIALIZE_PTR(ce->interfaces);
+
+			for (i = 0; i < ce->num_interfaces; i++) {
+				UNSERIALIZE_PTR(ce->interfaces[i]);
+			}
 		}
 	}
 
