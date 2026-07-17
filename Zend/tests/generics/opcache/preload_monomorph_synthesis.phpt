@@ -3,6 +3,7 @@ Opcache preload: runtime monomorph synthesis works against a preloaded (immutabl
 --INI--
 opcache.enable=1
 opcache.enable_cli=1
+opcache.file_update_protection=0
 opcache.optimization_level=-1
 opcache.preload={PWD}/preload_generic.inc
 --EXTENSIONS--

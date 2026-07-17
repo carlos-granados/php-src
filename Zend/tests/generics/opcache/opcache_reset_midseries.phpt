@@ -3,6 +3,7 @@ Opcache reset: runtime monomorphs survive an opcache_reset() (they live in the p
 --INI--
 opcache.enable=1
 opcache.enable_cli=1
+opcache.file_update_protection=0
 --EXTENSIONS--
 opcache
 --FILE--
