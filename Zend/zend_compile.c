@@ -2039,6 +2039,31 @@ static void zend_validate_class_accepts_type_args(zend_string *resolved_name)
 	zend_string *lc = zend_string_tolower(resolved_name);
 	zend_class_entry *ce = zend_hash_find_ptr(CG(class_table), lc);
 	zend_string_release(lc);
+	if (!ce) {
+		/* Not found under its plain name doesn't mean "not yet seen":
+		 * opcache's delayed-binding compilation (any opcache.file_cache
+		 * config, or a class whose parent is deliberately ignored for early
+		 * binding, e.g. an internal class under
+		 * ZEND_COMPILE_IGNORE_INTERNAL_CLASSES) still fully compiles the
+		 * class body -- generic_parameters included -- but registers it in
+		 * CG(class_table) under a mangled runtime-definition key instead of
+		 * its plain name, to be bound for real only when its
+		 * ZEND_DECLARE_CLASS_DELAYED opcode executes. Fall back to a scan
+		 * for a same-named user class already compiled in this unit, so the
+		 * "must be generic" rule doesn't silently no-op just because early
+		 * binding was skipped -- the runtime by-name monomorph lookup
+		 * deliberately never raises this error itself (see
+		 * zend_try_synthesize_monomorph_by_name), so this compile-time
+		 * check is the only enforcement point. */
+		zend_class_entry *cand;
+		ZEND_HASH_FOREACH_PTR(CG(class_table), cand) {
+			if (cand->type == ZEND_USER_CLASS
+					&& zend_string_equals_ci(cand->name, resolved_name)) {
+				ce = cand;
+				break;
+			}
+		} ZEND_HASH_FOREACH_END();
+	}
 	if (ce && !ce->generic_parameters) {
 		zend_error_noreturn(E_COMPILE_ERROR,
 			"Type arguments are not allowed on non-generic class %s",
