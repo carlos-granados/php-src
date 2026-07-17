@@ -2148,6 +2148,29 @@ ZEND_METHOD(ReflectionFunctionAbstract, getClosureUsedVariables)
 	}
 } /* }}} */
 
+/* A fake closure carries no generic bindings, so a target with required
+ * (non-defaulted) type parameters could never be invoked through it —
+ * reject at creation, mirroring Closure::fromCallable and the compile-time
+ * rule for naked first-class callables on generic functions. */
+static bool reflection_check_generic_closure_target(const zend_function *fptr)
+{
+	uint32_t required = zend_generic_fn_required_type_params(fptr);
+	if (EXPECTED(required == 0)) {
+		return true;
+	}
+	zend_throw_exception_ex(reflection_exception_ptr, 0,
+		"Cannot create closure for generic function %s%s%s(): requires %u explicit type argument%s; "
+		"create the closure with a first-class callable instead, e.g. %s%s%s::<...>(...)",
+		fptr->common.scope ? ZSTR_VAL(fptr->common.scope->name) : "",
+		fptr->common.scope ? "::" : "",
+		ZSTR_VAL(fptr->common.function_name),
+		required, required == 1 ? "" : "s",
+		fptr->common.scope ? ZSTR_VAL(fptr->common.scope->name) : "",
+		fptr->common.scope ? "::" : "",
+		ZSTR_VAL(fptr->common.function_name));
+	return false;
+}
+
 /* {{{ Returns a dynamically created closure for the function */
 ZEND_METHOD(ReflectionFunction, getClosure)
 {
@@ -2161,6 +2184,9 @@ ZEND_METHOD(ReflectionFunction, getClosure)
 		/* Closures are immutable objects */
 		RETURN_OBJ_COPY(Z_OBJ(intern->obj));
 	} else {
+		if (!reflection_check_generic_closure_target(fptr)) {
+			RETURN_THROWS();
+		}
 		zend_create_fake_closure(return_value, fptr, NULL, NULL, NULL);
 	}
 }
@@ -3635,6 +3661,10 @@ ZEND_METHOD(ReflectionMethod, getClosure)
 	}
 
 	GET_REFLECTION_OBJECT_PTR(mptr);
+
+	if (!reflection_check_generic_closure_target(mptr)) {
+		RETURN_THROWS();
+	}
 
 	if (mptr->common.fn_flags & ZEND_ACC_STATIC)  {
 		zend_create_fake_closure(return_value, mptr, mptr->common.scope, mptr->common.scope, NULL);

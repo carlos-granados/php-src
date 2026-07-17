@@ -353,6 +353,24 @@ static ZEND_NAMED_FUNCTION(zend_closure_call_magic) /* {{{ */ {
 }
 /* }}} */
 
+/* Number of required (non-defaulted) generic type parameters of `fn`. A
+ * result > 0 means a closure over `fn` created WITHOUT bindings (fake
+ * closure / fromCallable) could never be invoked — invocation has no way to
+ * supply type arguments — so such wrappers must be rejected at creation. */
+ZEND_API uint32_t zend_generic_fn_required_type_params(const zend_function *fn)
+{
+	if (!ZEND_USER_CODE(fn->common.type) || !fn->op_array.generic_parameters) {
+		return 0;
+	}
+	const zend_generic_parameter_list *params = fn->op_array.generic_parameters;
+	uint32_t required = 0;
+	while (required < params->count
+			&& !ZEND_TYPE_IS_SET(params->parameters[required].default_type)) {
+		required++;
+	}
+	return required;
+}
+
 static zend_result zend_create_closure_from_callable(zval *return_value, zval *callable, char **error) /* {{{ */ {
 	zend_fcall_info_cache fcc;
 	zend_function *mptr;
@@ -397,6 +415,31 @@ static zend_result zend_create_closure_from_callable(zval *return_value, zval *c
 
 		zend_free_trampoline(mptr);
 		mptr = (zend_function *) &call;
+	}
+
+	/* A generic function with required (non-defaulted) type parameters can
+	 * never be invoked through a fromCallable closure — invocation has no way
+	 * to supply type arguments. Reject at creation, mirroring the
+	 * compile-time rule for naked first-class callables on generic
+	 * functions. Defaulted-only type parameters stay allowed (a naked call
+	 * resolves them like any other naked call). */
+	{
+		uint32_t required = zend_generic_fn_required_type_params(mptr);
+		if (required > 0) {
+			if (error) {
+				zend_spprintf(error, 0,
+					"generic function %s%s%s() requires %u explicit type argument%s; "
+					"create the closure with a first-class callable instead, e.g. %s%s%s::<...>(...)",
+					mptr->common.scope ? ZSTR_VAL(mptr->common.scope->name) : "",
+					mptr->common.scope ? "::" : "",
+					ZSTR_VAL(mptr->common.function_name),
+					required, required == 1 ? "" : "s",
+					mptr->common.scope ? ZSTR_VAL(mptr->common.scope->name) : "",
+					mptr->common.scope ? "::" : "",
+					ZSTR_VAL(mptr->common.function_name));
+			}
+			return FAILURE;
+		}
 	}
 
 	if (fcc.object) {
