@@ -8965,15 +8965,13 @@ static int zend_jit_setup_hot_trace_counters_ex(zend_op_array *op_array, bool ru
 
 	ZEND_ASSERT(sizeof(zend_op_trace_info) == sizeof(zend_op));
 
-	if (runtime) {
-		/* Runtime-synthesized generic monomorph: no SHM lock is held and the
-		 * op_array (with its detached opcode buffer) is request-local, so the
-		 * extension lives in the request arena instead of shared memory. */
-		jit_extension = (zend_jit_op_array_trace_extension*)zend_arena_alloc(&CG(arena),
-			sizeof(zend_jit_op_array_trace_extension) + (op_array->last - 1) * sizeof(zend_op_trace_info));
-	} else {
-		jit_extension = (zend_jit_op_array_trace_extension*)zend_shared_alloc(sizeof(zend_jit_op_array_trace_extension) + (op_array->last - 1) * sizeof(zend_op_trace_info));
-	}
+	/* Both call sites allocate the extension in SHM: script load runs inside
+	 * the persist lock, and the runtime monomorph path (see
+	 * zend_jit_monomorph_runtime_setup) only fires for monomorphs that were
+	 * themselves just persisted into SHM — their opcodes, this extension,
+	 * and any compiled traces all share the SHM lifetime, so cross-request
+	 * reuse is safe by construction. */
+	jit_extension = (zend_jit_op_array_trace_extension*)zend_shared_alloc(sizeof(zend_jit_op_array_trace_extension) + (op_array->last - 1) * sizeof(zend_op_trace_info));
 	if (!jit_extension) {
 		return FAILURE;
 	}
@@ -9054,11 +9052,14 @@ static int zend_jit_setup_hot_trace_counters(zend_op_array *op_array)
 	return zend_jit_setup_hot_trace_counters_ex(op_array, /* runtime */ false);
 }
 
-/* zend_jit_op_array_runtime_setup hook: called by zend_synthesize_function_monomorph
- * for each runtime monomorph after it detached its opcode buffer. Installs
- * per-monomorph trace counters so the monomorph can be traced and compiled with
- * its own substituted arg_info. Guarded here (not at hook-set time) because
- * JIT_G(on) can be toggled per request. */
+/* zend_jit_op_array_runtime_setup hook: called by monomorph synthesis for
+ * each runtime monomorph AFTER it was persisted into opcache SHM (the engine
+ * never calls it for per-request arena monomorphs — those stay interpreted).
+ * Installs per-monomorph trace counters so the monomorph can be traced and
+ * compiled with its own substituted arg_info; counters, extension, opcodes
+ * and compiled traces all live in SHM, so they remain valid across requests.
+ * Guarded here (not at hook-set time) because JIT_G(on) can be toggled per
+ * request. */
 static void zend_jit_monomorph_runtime_setup(zend_op_array *op_array)
 {
 	if (!zend_jit_startup_ok
@@ -9068,18 +9069,26 @@ static void zend_jit_monomorph_runtime_setup(zend_op_array *op_array)
 			|| dasm_ptr == NULL) {
 		return;
 	}
-	/* The extension and patched handlers are request-local (arena), but the
-	 * counter-slot cursor ZEND_JIT_COUNTER_NUM lives in SHM: writing it needs
-	 * the allocator lock (cross-process round-robin) and, under
-	 * opcache.protect_memory, an unprotect window. If this process already
-	 * holds the lock (synthesis triggered inside a persist/compile window),
-	 * skip the setup — the monomorph simply stays interpreted. */
+	/* Idempotence across processes: another worker may have installed the
+	 * counters on this shared op_array already (checked again under the
+	 * lock below). */
+	if (ZEND_FUNC_INFO(op_array)) {
+		return;
+	}
+	/* All writes below touch SHM (extension alloc, handler patches in the
+	 * monomorph's persisted opcodes, and the counter-slot cursor
+	 * ZEND_JIT_COUNTER_NUM aka zend_jit_traces[0].root): take the allocator
+	 * lock and, under opcache.protect_memory, an unprotect window. If this
+	 * process already holds the lock (synthesis inside a persist window),
+	 * skip — the monomorph simply stays interpreted. */
 	if (ZCG(locked)) {
 		return;
 	}
 	zend_shared_alloc_lock();
 	SHM_UNPROTECT();
-	zend_jit_setup_hot_trace_counters_ex(op_array, /* runtime */ true);
+	if (!ZEND_FUNC_INFO(op_array)) {
+		zend_jit_setup_hot_trace_counters_ex(op_array, /* runtime */ true);
+	}
 	SHM_PROTECT();
 	zend_shared_alloc_unlock();
 }

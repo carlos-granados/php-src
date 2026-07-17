@@ -64,14 +64,15 @@ build_one() {
   git -C "$SRC" worktree add --detach "$dir" "$ref"
 
   if [[ "$apply_instrumentation" == "yes" ]]; then
-    # The instrumentation may be uncommitted (apply as a patch) or already
-    # committed into $ref (patch is empty — nothing to do). Handle both.
-    local patch; patch="$(git -C "$SRC" diff --binary HEAD -- "${INSTRUMENTATION_FILES[@]}")"
+    # Carry ALL uncommitted engine changes (instrumentation, in-flight
+    # generics work) into the bench worktree; empty when everything is
+    # committed into $ref.
+    local patch; patch="$(git -C "$SRC" diff --binary HEAD)"
     if [[ -n "$patch" ]]; then
-      echo "=== [$name] applying uncommitted instrumentation patch ==="
+      echo "=== [$name] applying uncommitted working-tree patch ==="
       printf '%s\n' "$patch" | git -C "$dir" apply --index
     else
-      echo "=== [$name] instrumentation already present in $ref (no patch needed) ==="
+      echo "=== [$name] working tree clean (no patch needed) ==="
     fi
   fi
 

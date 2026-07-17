@@ -147,6 +147,7 @@ ZEND_API zend_generic_parameter_list *zend_generic_parameter_list_alloc(uint32_t
 	zend_generic_parameter_list *list = pemalloc(ZEND_GENERIC_PARAMETER_LIST_SIZE(count), persistent);
 	list->count = count;
 	list->persisted = false;
+	list->monomorph_cache = NULL;
 	for (uint32_t i = 0; i < count; i++) {
 		list->parameters[i].name = NULL;
 		list->parameters[i].variance = 0;
@@ -343,6 +344,7 @@ ZEND_API zend_type_arg_table *zend_type_arg_table_alloc(uint32_t count) {
 	table->count = count;
 	table->generation = zend_type_arg_table_generation_counter++;
 	table->persisted = false;
+	table->shm = false;
 	for (uint32_t i = 0; i < count; i++) {
 		table->entries[i].name = NULL;
 		table->entries[i].type_ref = NULL;
@@ -1005,21 +1007,27 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 	 * just below without reaching the generic_types teardown at the end). It
 	 * owns the entry names + owned_types of its arena-allocated
 	 * monomorph_type_args (built in zend_synthesize_function_monomorph); the
-	 * arena reclaims only the struct, so release the refcounted entry name
-	 * here — mirroring the GENERIC_ARGINFO_CLONE block above. Idempotent;
-	 * skipped for immutable/SHM copies whose names are interned/shared.
-	 * owned_type is arena-allocated (zend_type_copy_ctor use_arena=true), so
-	 * it is reclaimed with the arena and must NOT be zend_type_release'd —
-	 * doing so would efree its arena-held type list and corrupt the heap. */
+	 * arena reclaims only the struct, so release the refcounted entry name and
+	 * the HEAP-allocated owned_type here — mirroring the
+	 * GENERIC_ARGINFO_CLONE block above. Idempotent; skipped for
+	 * immutable/SHM-persisted copies whose names/types are interned/shared. */
 	if ((op_array->fn_flags2 & ZEND_ACC2_MONOMORPH_TYPE_ARGS)
 			&& !(op_array->fn_flags & ZEND_ACC_IMMUTABLE)
 			&& op_array->generic_types
-			&& op_array->generic_types->monomorph_type_args) {
+			&& op_array->generic_types->monomorph_type_args
+			/* An SHM-persisted monomorph's table is shared and read-only;
+			 * the !IMMUTABLE gate alone doesn't exclude it because closures
+			 * memcpy the op_array and clear IMMUTABLE on their copy. */
+			&& !op_array->generic_types->monomorph_type_args->shm) {
 		zend_type_arg_table *mt = op_array->generic_types->monomorph_type_args;
 		for (uint32_t k = 0; k < mt->count; k++) {
 			if (mt->entries[k].name) {
 				zend_string_release(mt->entries[k].name);
 				mt->entries[k].name = NULL;
+			}
+			if (ZEND_TYPE_IS_SET(mt->entries[k].owned_type)) {
+				zend_type_release(mt->entries[k].owned_type, /* persistent */ false);
+				mt->entries[k].owned_type = (zend_type) ZEND_TYPE_INIT_NONE(0);
 			}
 		}
 	}

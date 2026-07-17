@@ -127,6 +127,10 @@ bool fallback_process = false; /* process uses file cache fallback */
 static zend_op_array *(*accelerator_orig_compile_file)(zend_file_handle *file_handle, int type);
 static zend_class_entry* (*accelerator_orig_inheritance_cache_get)(zend_class_entry *ce, zend_class_entry *parent, zend_class_entry **traits_and_interfaces);
 static zend_class_entry* (*accelerator_orig_inheritance_cache_add)(zend_class_entry *ce, zend_class_entry *proto, zend_class_entry *parent, zend_class_entry **traits_and_interfaces, HashTable *dependencies);
+static zend_class_entry* (*accelerator_orig_monomorph_cache_get)(zend_class_entry *base, zend_string *lc_name);
+static zend_class_entry* (*accelerator_orig_monomorph_cache_add)(zend_class_entry *base, zend_string *lc_name, zend_class_entry *mono);
+static zend_function* (*accelerator_orig_fn_monomorph_cache_get)(zend_function *base, zend_string *lc_name);
+static zend_function* (*accelerator_orig_fn_monomorph_cache_add)(zend_function *base, zend_string *lc_name, zend_function *mono);
 static zend_result (*accelerator_orig_zend_stream_open_function)(zend_file_handle *handle );
 static zend_string *(*accelerator_orig_zend_resolve_path)(zend_string *filename);
 static zif_handler orig_chdir = NULL;
@@ -2517,6 +2521,247 @@ static zend_class_entry* zend_accel_inheritance_cache_add(zend_class_entry *ce, 
 	return new_ce;
 }
 
+/* ==== SHM cache for runtime-synthesized generic monomorphs ====
+ *
+ * Modeled on the inheritance cache above: entries hang off the TEMPLATE's
+ * persisted generic_parameters list, so cached monomorphs die with their
+ * template when the declaring script is invalidated. `get` is lock-free
+ * (append-only list, like inheritance_cache walks); `add` persists the
+ * freshly linked monomorph into SHM under the allocator lock and returns
+ * the immutable copy — the arena original is cannibalized by persist and
+ * must simply be dropped by the caller, never destroyed. */
+
+typedef struct _zend_monomorph_cache_entry {
+	struct _zend_monomorph_cache_entry *next;
+	zend_string *lc_name;   /* SHM interned lowercased canonical name */
+	void        *mono;      /* persisted zend_class_entry* / zend_function* */
+} zend_monomorph_cache_entry;
+
+static zend_monomorph_cache_entry *zend_accel_monomorph_cache_find(
+		const zend_generic_parameter_list *params, const zend_string *lc_name)
+{
+	zend_monomorph_cache_entry *entry = params->monomorph_cache;
+	while (entry) {
+		if (zend_string_equal_content(entry->lc_name, lc_name)) {
+			return entry;
+		}
+		entry = entry->next;
+	}
+	return NULL;
+}
+
+static zend_class_entry* zend_accel_monomorph_cache_get(zend_class_entry *base, zend_string *lc_name)
+{
+	zend_monomorph_cache_entry *entry;
+
+	if (!ZCG(accelerator_enabled) || !base->generic_parameters) {
+		return NULL;
+	}
+	entry = zend_accel_monomorph_cache_find(base->generic_parameters, lc_name);
+	if (!entry) {
+		return NULL;
+	}
+	if (ZCSG(map_ptr_last) > CG(map_ptr_last)) {
+		zend_map_ptr_extend(ZCSG(map_ptr_last));
+	}
+	zend_class_entry *ce = (zend_class_entry*)entry->mono;
+	if (ZSTR_HAS_CE_CACHE(ce->name)) {
+		ZSTR_SET_CE_CACHE_EX(ce->name, ce, 0);
+	}
+	return ce;
+}
+
+/* Common prologue/epilogue for persisting one monomorph (class or function).
+ * Interns the cache key, sizes the payload via `calc`, carves the cache
+ * entry + payload from one SHM block, and links the entry onto the
+ * template's list. Returns the persisted payload or NULL (SHM full /
+ * interned-strings buffer full / raced by another process). */
+static void *zend_accel_monomorph_persist(
+		zend_generic_parameter_list *params, zend_string *lc_name,
+		void *(*persist)(void *ptr), void (*calc)(void *ptr), void *ptr)
+{
+	zend_persistent_script dummy;
+	zend_monomorph_cache_entry *entry;
+	zend_string *key;
+	void *persisted;
+	size_t size;
+
+	if (!ZCG(accelerator_enabled) ||
+	    (ZCSG(restart_in_progress) && accel_restart_is_active()) ||
+	    !zend_accel_in_shm(params)) {
+		return NULL;
+	}
+
+	SHM_UNPROTECT();
+	zend_shared_alloc_lock();
+
+	/* Another process may have persisted this monomorph meanwhile. */
+	entry = zend_accel_monomorph_cache_find(params, lc_name);
+	if (entry) {
+		zend_shared_alloc_unlock();
+		SHM_PROTECT();
+		zend_map_ptr_extend(ZCSG(map_ptr_last));
+		return entry->mono;
+	}
+
+	/* The canonical name doubles as the EG table key on future requests;
+	 * it must live in SHM or the cache entry would dangle. */
+	zend_string_addref(lc_name);
+	key = accel_new_interned_string(lc_name);
+	if (!IS_ACCEL_INTERNED(key)) {
+		/* interned-strings buffer full; keep the monomorph per-request */
+		zend_string_release(key);
+		zend_shared_alloc_unlock();
+		SHM_PROTECT();
+		return NULL;
+	}
+
+	zend_shared_alloc_init_xlat_table();
+
+	memset(&dummy, 0, sizeof(dummy));
+	dummy.size = ZEND_ALIGNED_SIZE(sizeof(zend_monomorph_cache_entry));
+	ZCG(current_persistent_script) = &dummy;
+	ZCG(persisting_monomorph) = true;
+	calc(ptr);
+	size = dummy.size;
+
+	zend_shared_alloc_clear_xlat_table();
+
+#if ZEND_MM_NEED_EIGHT_BYTE_REALIGNMENT
+	/* Align to 8-byte boundary */
+	ZCG(mem) = zend_shared_alloc(size + 8);
+#else
+	ZCG(mem) = zend_shared_alloc(size);
+#endif
+
+	if (!ZCG(mem)) {
+		ZCG(persisting_monomorph) = false;
+		zend_shared_alloc_destroy_xlat_table();
+		zend_shared_alloc_unlock();
+		SHM_PROTECT();
+		return NULL;
+	}
+
+	zend_map_ptr_extend(ZCSG(map_ptr_last));
+
+#if ZEND_MM_NEED_EIGHT_BYTE_REALIGNMENT
+	/* Align to 8-byte boundary */
+	ZCG(mem) = (void*)(((uintptr_t)ZCG(mem) + 7L) & ~7L);
+#endif
+
+	memset(ZCG(mem), 0, size);
+	entry = (zend_monomorph_cache_entry*)ZCG(mem);
+	ZCG(mem) = (char*)ZCG(mem) + ZEND_ALIGNED_SIZE(sizeof(zend_monomorph_cache_entry));
+
+	/* See GH-15657 (inheritance cache): don't let persist JIT hook code. */
+#ifdef HAVE_JIT
+	bool jit_on_old = JIT_G(on);
+	JIT_G(on) = false;
+#endif
+
+	persisted = persist(ptr);
+
+#ifdef HAVE_JIT
+	JIT_G(on) = jit_on_old;
+#endif
+
+	ZCG(persisting_monomorph) = false;
+
+	entry->lc_name = key;
+	entry->mono = persisted;
+	entry->next = params->monomorph_cache;
+	params->monomorph_cache = entry;
+
+	ZCSG(map_ptr_last) = CG(map_ptr_last);
+
+	zend_shared_alloc_destroy_xlat_table();
+
+	zend_shared_alloc_unlock();
+	SHM_PROTECT();
+
+	/* Consistency check */
+	if ((char*)entry + size != (char*)ZCG(mem)) {
+		zend_accel_error(
+			((char*)entry + size < (char*)ZCG(mem)) ? ACCEL_LOG_ERROR : ACCEL_LOG_WARNING,
+			"Internal error: wrong monomorph size calculation: %s start=" ZEND_ADDR_FMT ", end=" ZEND_ADDR_FMT ", real=" ZEND_ADDR_FMT "\n",
+			ZSTR_VAL(lc_name),
+			(size_t)entry,
+			(size_t)((char *)entry + size),
+			(size_t)ZCG(mem));
+	}
+
+	zend_map_ptr_extend(ZCSG(map_ptr_last));
+
+	return persisted;
+}
+
+static void *zend_accel_monomorph_persist_class(void *ptr)
+{
+	zend_class_entry *new_ce = zend_persist_class_entry((zend_class_entry*)ptr);
+	zend_update_parent_ce(new_ce);
+	return new_ce;
+}
+
+static void zend_accel_monomorph_calc_class(void *ptr)
+{
+	zend_persist_class_entry_calc((zend_class_entry*)ptr);
+}
+
+static zend_class_entry* zend_accel_monomorph_cache_add(zend_class_entry *base, zend_string *lc_name, zend_class_entry *mono)
+{
+	ZEND_ASSERT(!(mono->ce_flags & ZEND_ACC_IMMUTABLE));
+	ZEND_ASSERT(mono->ce_flags & ZEND_ACC_LINKED);
+
+	if (!base->generic_parameters) {
+		return NULL;
+	}
+	return (zend_class_entry*)zend_accel_monomorph_persist(
+		base->generic_parameters, lc_name,
+		zend_accel_monomorph_persist_class, zend_accel_monomorph_calc_class, mono);
+}
+
+static zend_function* zend_accel_fn_monomorph_cache_get(zend_function *base, zend_string *lc_name)
+{
+	zend_monomorph_cache_entry *entry;
+
+	if (!ZCG(accelerator_enabled)
+			|| base->type != ZEND_USER_FUNCTION
+			|| !base->op_array.generic_parameters) {
+		return NULL;
+	}
+	entry = zend_accel_monomorph_cache_find(base->op_array.generic_parameters, lc_name);
+	if (!entry) {
+		return NULL;
+	}
+	if (ZCSG(map_ptr_last) > CG(map_ptr_last)) {
+		zend_map_ptr_extend(ZCSG(map_ptr_last));
+	}
+	return (zend_function*)entry->mono;
+}
+
+static void *zend_accel_monomorph_persist_fn(void *ptr)
+{
+	return zend_persist_monomorph_function((zend_function*)ptr);
+}
+
+static void zend_accel_monomorph_calc_fn(void *ptr)
+{
+	zend_persist_monomorph_function_calc((zend_function*)ptr);
+}
+
+static zend_function* zend_accel_fn_monomorph_cache_add(zend_function *base, zend_string *lc_name, zend_function *mono)
+{
+	ZEND_ASSERT(mono->type == ZEND_USER_FUNCTION);
+	ZEND_ASSERT(!(mono->common.fn_flags & ZEND_ACC_IMMUTABLE));
+
+	if (base->type != ZEND_USER_FUNCTION || !base->op_array.generic_parameters) {
+		return NULL;
+	}
+	return (zend_function*)zend_accel_monomorph_persist(
+		base->op_array.generic_parameters, lc_name,
+		zend_accel_monomorph_persist_fn, zend_accel_monomorph_calc_fn, mono);
+}
+
 #ifdef ZEND_WIN32
 static zend_result accel_gen_uname_id(void)
 {
@@ -3468,6 +3713,15 @@ file_cache_fallback:
 		accelerator_orig_inheritance_cache_add = zend_inheritance_cache_add;
 		zend_inheritance_cache_get = zend_accel_inheritance_cache_get;
 		zend_inheritance_cache_add = zend_accel_inheritance_cache_add;
+		/* Override monomorph cache callbacks */
+		accelerator_orig_monomorph_cache_get = zend_monomorph_cache_get;
+		accelerator_orig_monomorph_cache_add = zend_monomorph_cache_add;
+		accelerator_orig_fn_monomorph_cache_get = zend_fn_monomorph_cache_get;
+		accelerator_orig_fn_monomorph_cache_add = zend_fn_monomorph_cache_add;
+		zend_monomorph_cache_get = zend_accel_monomorph_cache_get;
+		zend_monomorph_cache_add = zend_accel_monomorph_cache_add;
+		zend_fn_monomorph_cache_get = zend_accel_fn_monomorph_cache_get;
+		zend_fn_monomorph_cache_add = zend_accel_fn_monomorph_cache_add;
 	}
 
 	return SUCCESS;
@@ -3527,6 +3781,10 @@ void accel_shutdown(void)
 	zend_compile_file = accelerator_orig_compile_file;
 	zend_inheritance_cache_get = accelerator_orig_inheritance_cache_get;
 	zend_inheritance_cache_add = accelerator_orig_inheritance_cache_add;
+	zend_monomorph_cache_get = accelerator_orig_monomorph_cache_get;
+	zend_monomorph_cache_add = accelerator_orig_monomorph_cache_add;
+	zend_fn_monomorph_cache_get = accelerator_orig_fn_monomorph_cache_get;
+	zend_fn_monomorph_cache_add = accelerator_orig_fn_monomorph_cache_add;
 
 	if ((ini_entry = zend_hash_str_find_ptr(EG(ini_directives), "include_path", sizeof("include_path")-1)) != NULL) {
 		ini_entry->on_modify = orig_include_path_on_modify;

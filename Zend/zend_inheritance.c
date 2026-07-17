@@ -33,6 +33,10 @@
 
 ZEND_API zend_class_entry* (*zend_inheritance_cache_get)(zend_class_entry *ce, zend_class_entry *parent, zend_class_entry **traits_and_interfaces) = NULL;
 ZEND_API zend_class_entry* (*zend_inheritance_cache_add)(zend_class_entry *ce, zend_class_entry *proto, zend_class_entry *parent, zend_class_entry **traits_and_interfaces, HashTable *dependencies) = NULL;
+ZEND_API zend_class_entry* (*zend_monomorph_cache_get)(zend_class_entry *base, zend_string *lc_name) = NULL;
+ZEND_API zend_class_entry* (*zend_monomorph_cache_add)(zend_class_entry *base, zend_string *lc_name, zend_class_entry *mono) = NULL;
+ZEND_API zend_function* (*zend_fn_monomorph_cache_get)(zend_function *base, zend_string *lc_name) = NULL;
+ZEND_API zend_function* (*zend_fn_monomorph_cache_add)(zend_function *base, zend_string *lc_name, zend_function *mono) = NULL;
 
 static void zend_check_generic_link_arity(
 		const zend_class_entry *target_ce, uint32_t arity,
@@ -7285,6 +7289,20 @@ ZEND_API zend_class_entry *zend_synthesize_monomorph(
 		return existing;
 	}
 
+	/* A previous request may have synthesized and persisted this monomorph
+	 * into opcache SHM; reuse the immutable copy instead of re-linking. Only
+	 * SHM-resident templates participate (their generic_parameters list
+	 * anchors the cache). */
+	if (zend_monomorph_cache_get && (base->ce_flags & ZEND_ACC_IMMUTABLE)) {
+		zend_class_entry *cached = zend_monomorph_cache_get(base, lc_canonical);
+		if (cached) {
+			zend_hash_add_ptr(EG(class_table), lc_canonical, cached);
+			zend_string_release(canonical);
+			zend_string_release(lc_canonical);
+			return cached;
+		}
+	}
+
 	/* Count only genuinely new syntheses (cache misses), not every request. */
 #ifdef ZEND_GENERICS_STATS
 	EG(generics_class_monomorphs)++;
@@ -7555,16 +7573,14 @@ ZEND_API zend_class_entry *zend_synthesize_monomorph(
 	}
 
 	/* Tracing JIT: give each substituted method clone its own opcode buffer
-	 * and per-monomorph hot-trace counters, so this binding's methods can be
-	 * traced and compiled against THEIR substituted arg_info without touching
-	 * the template or sibling monomorphs. Only request-local clones qualify:
-	 * ARGINFO_CLONE marks a private-arg_info clone over a shared body, and
-	 * !IMMUTABLE excludes SHM-persisted clones inherited from cached concrete
-	 * classes (their fn structs are read-only). This runs AFTER the link, so
-	 * an inheritance-cache entry persisted during the link keeps the shared,
-	 * counter-free state. The runtime cache is allocated eagerly because
-	 * JIT'd method entry reads RUN_TIME_CACHE without the interpreter's
-	 * lazy-alloc fallback. */
+	 * BEFORE SHM persistence, so the buffer (and later the trace-counter
+	 * handler patches) lands in stable shared memory. Only request-local
+	 * clones qualify: ARGINFO_CLONE marks a private-arg_info clone over a
+	 * shared body, and !IMMUTABLE excludes SHM clones inherited from cached
+	 * concrete classes. Counter installation happens after a successful
+	 * persist; unpersisted (per-request) monomorphs stay INTERPRETED — the
+	 * process-global JIT state must never reference addresses that die with
+	 * the request arena. */
 	if (zend_jit_op_array_runtime_setup) {
 		zend_function *mfn;
 		ZEND_HASH_MAP_FOREACH_PTR(&linked->function_table, mfn) {
@@ -7574,16 +7590,43 @@ ZEND_API zend_class_entry *zend_synthesize_monomorph(
 					&& !(mfn->common.fn_flags & ZEND_ACC_IMMUTABLE)) {
 				mfn->common.fn_flags2 |= ZEND_ACC2_JIT_MONO_SETUP;
 				zend_monomorph_detach_opcodes(&mfn->op_array, &mfn->op_array);
-				if (!RUN_TIME_CACHE(&mfn->op_array)) {
-					zend_init_func_run_time_cache(&mfn->op_array);
-				}
-				zend_jit_op_array_runtime_setup(&mfn->op_array);
 			}
 		} ZEND_HASH_FOREACH_END();
 	}
 
+	/* Persist the linked monomorph into opcache SHM so future requests (and
+	 * sibling processes) reuse it instead of re-synthesizing — and so JIT'd
+	 * code for it survives the request. On success the arena original has
+	 * been cannibalized by the persist (heap members freed or relocated):
+	 * swap the class-table slot by direct pointer write — a hash update
+	 * would run destroy_zend_class on the husk and double-free. */
+	zend_class_entry *result = linked;
+	if (zend_monomorph_cache_add
+			&& (base->ce_flags & ZEND_ACC_IMMUTABLE)
+			&& !(linked->ce_flags & ZEND_ACC_IMMUTABLE)) {
+		zend_class_entry *persisted = zend_monomorph_cache_add(base, lc_canonical, linked);
+		if (persisted) {
+			zval *slot = zend_hash_find(EG(class_table), lc_canonical);
+			ZEND_ASSERT(slot && "monomorph must still occupy its class-table slot");
+			Z_PTR_P(slot) = persisted;
+			result = persisted;
+
+			/* Now that every method body lives at a stable SHM address,
+			 * install the per-monomorph hot-trace counters. */
+			if (zend_jit_op_array_runtime_setup) {
+				zend_function *mfn;
+				ZEND_HASH_MAP_FOREACH_PTR(&persisted->function_table, mfn) {
+					if (mfn->type == ZEND_USER_FUNCTION
+							&& (mfn->common.fn_flags2 & ZEND_ACC2_JIT_MONO_SETUP)) {
+						zend_jit_op_array_runtime_setup(&mfn->op_array);
+					}
+				} ZEND_HASH_FOREACH_END();
+			}
+		}
+	}
+
 	zend_string_release(lc_canonical);
-	return linked;
+	return result;
 }
 
 /* === Monomorph name parser ===
@@ -8156,6 +8199,23 @@ ZEND_API zend_function *zend_synthesize_function_monomorph(
 		return existing;
 	}
 
+	/* A previous request may have persisted this monomorph into opcache SHM;
+	 * reuse it. The runtime cache slot is per-request (map-ptr offset) and
+	 * the call-swap dispatch path reads RUN_TIME_CACHE without a lazy-alloc
+	 * fallback, so initialize it eagerly on first use each request. */
+	if (zend_fn_monomorph_cache_get && (base->common.fn_flags & ZEND_ACC_IMMUTABLE)) {
+		zend_function *cached = zend_fn_monomorph_cache_get(base, lc_name);
+		if (cached) {
+			if (!RUN_TIME_CACHE(&cached->op_array)) {
+				zend_init_func_run_time_cache(&cached->op_array);
+			}
+			zend_hash_add_ptr(EG(function_table), lc_name, cached);
+			zend_string_release(display_name);
+			zend_string_release(lc_name);
+			return cached;
+		}
+	}
+
 	zend_arg_info *new_arg_info = zend_monomorph_build_arg_info(&base->op_array, args, arity);
 
 	zend_op_array *mono = zend_arena_alloc(&CG(arena), sizeof(zend_op_array));
@@ -8171,13 +8231,18 @@ ZEND_API zend_function *zend_synthesize_function_monomorph(
 		mono_targs->count = tcount;
 		mono_targs->generation = 0;
 		mono_targs->persisted = true;
+		mono_targs->shm = false;
 		for (uint32_t i = 0; i < tcount; i++) {
 			mono_targs->entries[i].name = NULL;
 			mono_targs->entries[i].type_ref = NULL;
 			mono_targs->entries[i].owned_type = (zend_type) ZEND_TYPE_INIT_NONE(0);
 			if (i < arity && ZEND_TYPE_IS_SET(args[i])) {
 				zend_type owned = args[i];
-				zend_type_copy_ctor(&owned, /* use_arena */ true, /* persistent */ false);
+				/* Heap, not arena: SHM persistence relocates owned_type via
+				 * zend_persist_type, whose free-the-source semantics assume
+				 * heap payloads (arena NWAs carry no detectable marker). The
+				 * unpersisted fallback releases it in destroy_op_array. */
+				zend_type_copy_ctor(&owned, /* use_arena */ false, /* persistent */ false);
 				mono_targs->entries[i].owned_type = owned;
 				zend_string *cname = zend_type_arg_canonical_name(args[i]);
 				mono_targs->entries[i].name = cname;
@@ -8214,24 +8279,42 @@ ZEND_API zend_function *zend_synthesize_function_monomorph(
 	ZEND_MAP_PTR_INIT(mono->run_time_cache, NULL);
 	ZEND_MAP_PTR_INIT(mono->static_variables_ptr, NULL);
 
-	/* Allocate the runtime cache now: the call swaps to this op_array before
-	 * DO_FCALL, whose hot path reads RUN_TIME_CACHE without lazy allocation. */
-	zend_init_func_run_time_cache(mono);
-
-	/* Tracing JIT: detach the opcode buffer and install per-monomorph hot-trace
-	 * counters so this binding can be traced and compiled with ITS substituted
-	 * arg_info (the template and its other monomorphs stay independent). */
+	/* Tracing JIT: give the monomorph its own opcode buffer BEFORE SHM
+	 * persistence, so the buffer (and later the trace-counter handler
+	 * patches) lands in stable shared memory. */
 	if (zend_jit_op_array_runtime_setup) {
 		zend_monomorph_detach_opcodes(mono, &base->op_array);
-		zend_jit_op_array_runtime_setup(mono);
 	}
 
+	/* Persist into opcache SHM so future requests reuse the monomorph and
+	 * JIT'd code for it survives the request. On success the arena original
+	 * has been cannibalized by the persist — use only the immutable copy.
+	 * Unpersisted (per-request) monomorphs stay interpreted: process-global
+	 * JIT state must never reference request-arena addresses. */
 	zend_function *mono_fn = (zend_function *) mono;
+	if (zend_fn_monomorph_cache_add && (base->common.fn_flags & ZEND_ACC_IMMUTABLE)) {
+		zend_function *persisted = zend_fn_monomorph_cache_add(base, lc_name, mono_fn);
+		if (persisted) {
+			mono_fn = persisted;
+			if (zend_jit_op_array_runtime_setup
+					&& (persisted->common.fn_flags2 & ZEND_ACC2_MONOMORPH_TYPE_ARGS)) {
+				zend_jit_op_array_runtime_setup(&persisted->op_array);
+			}
+		}
+	}
+
+	/* Allocate the runtime cache now: the call swaps to this op_array before
+	 * DO_FCALL, whose hot path reads RUN_TIME_CACHE without lazy allocation.
+	 * (For a persisted monomorph this fills the per-request map-ptr slot.) */
+	if (!RUN_TIME_CACHE(&mono_fn->op_array)) {
+		zend_init_func_run_time_cache(&mono_fn->op_array);
+	}
+
 	if (!zend_hash_add_ptr(EG(function_table), lc_name, mono_fn)) {
 		existing = zend_hash_find_ptr(EG(function_table), lc_name);
 		zend_string_release(display_name);
 		zend_string_release(lc_name);
-		zend_string_release(mono->function_name);
+		zend_string_release(mono_fn->op_array.function_name);
 		return existing;
 	}
 

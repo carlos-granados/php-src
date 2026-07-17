@@ -441,12 +441,20 @@ static zend_generic_parameter_list *zend_persist_generic_parameter_list(zend_gen
 	if (!list) {
 		return NULL;
 	}
+	/* A runtime function monomorph shares its template's list, which is
+	 * already SHM-resident — re-persisting would copy it AND efree SHM.
+	 * (The `persisted` flag can't be the guard: monomorph synthesis sets it
+	 * on arena tables purely to suppress frame teardown.) */
+	if (!ZCG(current_persistent_script)->corrupted && zend_accel_in_shm(list)) {
+		return list;
+	}
 
 	zend_generic_parameter_list *persisted = zend_shared_memdup_put_free(
 		list,
 		ZEND_GENERIC_PARAMETER_LIST_SIZE(list->count)
 	);
 	persisted->persisted = true;
+	persisted->monomorph_cache = NULL;
 
 	for (uint32_t i = 0; i < persisted->count; i++) {
 		zend_generic_parameter *param = &persisted->parameters[i];
@@ -527,6 +535,7 @@ static void zend_persist_concrete_call_table(zend_turbofish_args_entry *copy)
 	zend_type_arg_table *persisted = zend_shared_memdup_put_free(
 		src, ZEND_TYPE_ARG_TABLE_SIZE(src->count));
 	persisted->persisted = true;
+	persisted->shm = !ZCG(current_persistent_script)->corrupted;
 	copy->concrete_table = persisted;
 }
 
@@ -616,6 +625,7 @@ static zend_type_arg_table *zend_persist_type_arg_table(
 	zend_type_arg_table *persisted = zend_shared_memdup_put_free(
 		table, ZEND_TYPE_ARG_TABLE_SIZE(table->count));
 	persisted->persisted = true;
+	persisted->shm = !ZCG(current_persistent_script)->corrupted;
 	return persisted;
 }
 
@@ -624,8 +634,16 @@ static zend_generic_type_table *zend_persist_generic_type_table(zend_generic_typ
 	if (!table) {
 		return NULL;
 	}
+	/* Same shared-with-template re-entry guard as the parameter list. */
+	if (!ZCG(current_persistent_script)->corrupted && zend_accel_in_shm(table)) {
+		return table;
+	}
 
-	zend_generic_type_table *persisted = zend_shared_memdup_put_free(table, sizeof(*table));
+	/* A runtime function monomorph's table (the only kind that carries
+	 * monomorph_type_args) is arena-allocated — copy without freeing. */
+	zend_generic_type_table *persisted = table->monomorph_type_args
+		? zend_shared_memdup_put(table, sizeof(*table))
+		: zend_shared_memdup_put_free(table, sizeof(*table));
 	persisted->persisted = true;
 	if (persisted->return_type) {
 		persisted->return_type = zend_shared_memdup_put_free(persisted->return_type, sizeof(zend_type));
@@ -657,8 +675,35 @@ static zend_generic_type_table *zend_persist_generic_type_table(zend_generic_typ
 		persisted->trait_uses = zend_persist_generic_type_table_ht(persisted->trait_uses);
 	}
 
-	if (persisted->turbofish_args) {
+	if (persisted->turbofish_args
+			/* A function monomorph's fresh table borrows the template's
+			 * already-persisted turbofish_args (nested call-site bindings);
+			 * keep the shared SHM pointer instead of re-persisting it. */
+			&& !(!ZCG(current_persistent_script)->corrupted
+				&& zend_accel_in_shm(persisted->turbofish_args))) {
 		persisted->turbofish_args = zend_persist_turbofish_args_ht(persisted->turbofish_args);
+	}
+
+	if (persisted->monomorph_type_args) {
+		/* A runtime function monomorph's invariant concrete type-arg table:
+		 * arena-allocated at synthesis (so no free on memdup), entries hold
+		 * an owned canonical name + owned_type and never a borrowed
+		 * type_ref. Only reached when persisting runtime monomorphs — script
+		 * persist never sees this field populated. */
+		zend_type_arg_table *mt = persisted->monomorph_type_args;
+		for (uint32_t i = 0; i < mt->count; i++) {
+			if (mt->entries[i].name) {
+				zend_accel_store_interned_string(mt->entries[i].name);
+			}
+			mt->entries[i].type_ref = NULL;
+			if (ZEND_TYPE_IS_SET(mt->entries[i].owned_type)) {
+				zend_persist_type(&mt->entries[i].owned_type);
+			}
+		}
+		persisted->monomorph_type_args =
+			zend_shared_memdup_put(mt, ZEND_TYPE_ARG_TABLE_SIZE(mt->count));
+		persisted->monomorph_type_args->persisted = true;
+		persisted->monomorph_type_args->shm = !ZCG(current_persistent_script)->corrupted;
 	}
 
 	/* Precompute the value-check plan into SHM (relocated via the persist arena,
@@ -1105,6 +1150,8 @@ static void zend_persist_op_array(zval *zv)
 	}
 }
 
+static void zend_persist_monomorph_op_array_body(zend_op_array *op_array);
+
 static zend_op_array *zend_persist_class_method(zend_op_array *op_array, const zend_class_entry *ce)
 {
 	zend_op_array *old_op_array;
@@ -1166,6 +1213,28 @@ static zend_op_array *zend_persist_class_method(zend_op_array *op_array, const z
 		return old_op_array;
 	}
 
+	if (ZCG(persisting_monomorph)
+	 && !zend_shared_alloc_get_xlat_entry(op_array->opcodes)) {
+		/* RUNTIME monomorph method: every user method reaching this point
+		 * during a runtime-monomorph persist is a memcpy of an SHM template
+		 * method (inherited substituted clone, trait import, interface
+		 * method) that owns at most its substituted arg_info / detached
+		 * opcodes / generic tables / aliased name. The full
+		 * zend_persist_op_array_ex path would free-or-copy template-shared
+		 * SHM structures. (Script persist never sets the flag; its
+		 * compile-time clones take the regular shared-opcodes path below.) */
+		op_array = zend_shared_memdup_put(op_array, sizeof(zend_op_array));
+		zend_persist_monomorph_op_array_body(op_array);
+		if (ce->ce_flags & ZEND_ACC_IMMUTABLE) {
+			op_array->fn_flags |= ZEND_ACC_IMMUTABLE;
+			ZEND_MAP_PTR_NEW(op_array->run_time_cache);
+			if (op_array->static_variables) {
+				ZEND_MAP_PTR_NEW(op_array->static_variables_ptr);
+			}
+		}
+		return op_array;
+	}
+
 	op_array = zend_shared_memdup_put(op_array, sizeof(zend_op_array));
 	zend_persist_op_array_ex(op_array, NULL);
 	if (ce->ce_flags & ZEND_ACC_IMMUTABLE) {
@@ -1181,6 +1250,203 @@ static zend_op_array *zend_persist_class_method(zend_op_array *op_array, const z
 		}
 	}
 	return op_array;
+}
+
+/* Persist the body of a runtime monomorph op_array — a function monomorph or
+ * a substituted (ARGINFO_CLONE) method clone. Unlike zend_persist_op_array_ex,
+ * which assumes it owns every sub-structure (script persist), a monomorph is
+ * a memcpy of its SHM template and OWNS only:
+ *   - its opcode+literal buffer, when JIT-detached (one arena block);
+ *   - its substituted arg_info block (arena);
+ *   - its generic side tables (fresh, with template-shared members guarded
+ *     inside the persist helpers).
+ * Everything else (vars, live_range, try_catch_array, static_variables,
+ * attributes, filename, doc_comment, prototype, scope, run_time_cache
+ * layout) stays shared with the template. The caller has already
+ * shared_memdup'd the op_array struct itself. */
+static void zend_persist_monomorph_op_array_body(zend_op_array *op_array)
+{
+	/* A clone of a lazy-loaded template method shares (and addref'd, via
+	 * function_add_ref) the source's heap refcount; release that reference —
+	 * the persisted copy is immutable and never refcounted. */
+	if (op_array->refcount && --(*op_array->refcount) == 0) {
+		efree(op_array->refcount);
+	}
+	op_array->refcount = NULL;
+
+	/* Usually the template's SHM interned name (no-op); a heap string only
+	 * for trait-aliased imports. */
+	if (op_array->function_name) {
+		zend_accel_store_interned_string(op_array->function_name);
+	}
+
+	/* Methods scoped to the monomorph itself (trait imports, own methods)
+	 * must point at the persisted ce; template-scoped clones miss the xlat
+	 * and stay on their SHM defining class. */
+	if (op_array->scope) {
+		zend_class_entry *scope = zend_shared_alloc_get_xlat_entry(op_array->scope);
+		if (scope) {
+			op_array->scope = scope;
+		}
+		if (op_array->prototype) {
+			zend_function *proto = zend_shared_alloc_get_xlat_entry(op_array->prototype);
+			if (proto) {
+				op_array->prototype = proto;
+			}
+		}
+	}
+
+	if (op_array->static_variables && !zend_accel_in_shm(op_array->static_variables)) {
+		Bucket *p;
+
+		zend_hash_persist(op_array->static_variables);
+		ZEND_HASH_MAP_FOREACH_BUCKET(op_array->static_variables, p) {
+			ZEND_ASSERT(p->key != NULL);
+			zend_accel_store_interned_string(p->key);
+			zend_persist_zval(&p->val);
+		} ZEND_HASH_FOREACH_END();
+		op_array->static_variables = zend_shared_memdup_put_free(op_array->static_variables, sizeof(HashTable));
+		/* make immutable array */
+		GC_SET_REFCOUNT(op_array->static_variables, 2);
+		GC_TYPE_INFO(op_array->static_variables) = GC_ARRAY | ((IS_ARRAY_IMMUTABLE|GC_NOT_COLLECTABLE) << GC_FLAGS_SHIFT);
+	}
+
+	if (!zend_accel_in_shm(op_array->opcodes)) {
+		/* JIT-detached buffer: opcodes and literals live in one arena block
+		 * (see zend_monomorph_detach_opcodes); relocate both and recompute
+		 * the opline-relative IS_CONST offsets, exactly like script persist.
+		 * The literal zvals are shallow copies of the template's persisted
+		 * literals, so persisting their contents is a no-op walk. */
+		zval *orig_literals = op_array->literals;
+
+		if (orig_literals) {
+			op_array->literals = zend_shared_memdup_put(
+				orig_literals, sizeof(zval) * op_array->last_literal);
+		}
+
+		zend_op *new_opcodes = zend_shared_memdup_put(op_array->opcodes, sizeof(zend_op) * op_array->last);
+		zend_op *opline = new_opcodes;
+		zend_op *end = new_opcodes + op_array->last;
+
+		for (; opline < end; opline++) {
+#if ZEND_USE_ABS_CONST_ADDR
+			if (opline->op1_type == IS_CONST) {
+				opline->op1.zv = (zval*)((char*)opline->op1.zv + ((char*)op_array->literals - (char*)orig_literals));
+			}
+			if (opline->op2_type == IS_CONST) {
+				opline->op2.zv = (zval*)((char*)opline->op2.zv + ((char*)op_array->literals - (char*)orig_literals));
+			}
+#else
+			if (opline->op1_type == IS_CONST) {
+				opline->op1.constant =
+					(char*)(op_array->literals +
+						((zval*)((char*)(op_array->opcodes + (opline - new_opcodes)) +
+						(int32_t)opline->op1.constant) - orig_literals)) -
+					(char*)opline;
+			}
+			if (opline->op2_type == IS_CONST) {
+				opline->op2.constant =
+					(char*)(op_array->literals +
+						((zval*)((char*)(op_array->opcodes + (opline - new_opcodes)) +
+						(int32_t)opline->op2.constant) - orig_literals)) -
+					(char*)opline;
+			}
+#endif
+#if ZEND_USE_ABS_JMP_ADDR
+			if (op_array->fn_flags & ZEND_ACC_DONE_PASS_TWO) {
+				switch (opline->opcode) {
+					case ZEND_JMP:
+					case ZEND_FAST_CALL:
+						opline->op1.jmp_addr = &new_opcodes[opline->op1.jmp_addr - op_array->opcodes];
+						break;
+					case ZEND_JMPZ:
+					case ZEND_JMPNZ:
+					case ZEND_JMPZ_EX:
+					case ZEND_JMPNZ_EX:
+					case ZEND_JMP_SET:
+					case ZEND_COALESCE:
+					case ZEND_FE_RESET_R:
+					case ZEND_FE_RESET_RW:
+					case ZEND_ASSERT_CHECK:
+					case ZEND_JMP_NULL:
+					case ZEND_BIND_INIT_STATIC_OR_JMP:
+					case ZEND_JMP_FRAMELESS:
+						opline->op2.jmp_addr = &new_opcodes[opline->op2.jmp_addr - op_array->opcodes];
+						break;
+					case ZEND_CATCH:
+						if (!(opline->extended_value & ZEND_LAST_CATCH)) {
+							opline->op2.jmp_addr = &new_opcodes[opline->op2.jmp_addr - op_array->opcodes];
+						}
+						break;
+				}
+			}
+#endif
+		}
+		op_array->opcodes = new_opcodes;
+	}
+
+	if (op_array->arg_info) {
+		zend_arg_info *arg_info = op_array->arg_info;
+		if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+			arg_info--;
+		}
+		if (!zend_accel_in_shm(arg_info)) {
+			/* Substituted arg_info (arena, with copy_ctor'd types). */
+			uint32_t num_args = op_array->num_args;
+			if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+				num_args++;
+			}
+			if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+				num_args++;
+			}
+			arg_info = zend_shared_memdup_put(arg_info, sizeof(zend_arg_info) * num_args);
+			for (uint32_t i = 0; i < num_args; i++) {
+				if (arg_info[i].name) {
+					zend_accel_store_interned_string(arg_info[i].name);
+				}
+				zend_persist_type(&arg_info[i].type);
+				if (arg_info[i].doc_comment) {
+					zend_accel_store_interned_string(arg_info[i].doc_comment);
+				}
+			}
+			if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+				arg_info++;
+			}
+			op_array->arg_info = arg_info;
+		}
+	}
+
+	if (op_array->generic_parameters) {
+		/* in-shm guard inside keeps the template-shared list. */
+		op_array->generic_parameters = zend_persist_generic_parameter_list(op_array->generic_parameters);
+	}
+
+	if (op_array->generic_types) {
+		op_array->generic_types = zend_persist_generic_type_table(op_array->generic_types);
+	}
+}
+
+/* Persist one runtime-synthesized FUNCTION monomorph into SHM (called by the
+ * accel monomorph cache under the allocator lock, inside an xlat window,
+ * with ZCG(mem) sized by zend_persist_monomorph_function_calc). The source
+ * struct is arena-allocated — copied, never freed. */
+zend_function *zend_persist_monomorph_function(zend_function *func)
+{
+	zend_op_array *op_array;
+
+	ZEND_ASSERT(func->type == ZEND_USER_FUNCTION);
+	ZEND_ASSERT(!(func->common.fn_flags & ZEND_ACC_IMMUTABLE));
+
+	op_array = zend_shared_memdup_put(&func->op_array, sizeof(zend_op_array));
+	zend_persist_monomorph_op_array_body(op_array);
+	op_array->fn_flags |= ZEND_ACC_IMMUTABLE;
+	ZEND_MAP_PTR_NEW(op_array->run_time_cache);
+	if (op_array->static_variables) {
+		ZEND_MAP_PTR_NEW(op_array->static_variables_ptr);
+	} else {
+		ZEND_MAP_PTR_INIT(op_array->static_variables_ptr, NULL);
+	}
+	return (zend_function*)op_array;
 }
 
 static zend_property_info *zend_persist_property_info(zend_property_info *prop)

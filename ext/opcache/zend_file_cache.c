@@ -577,6 +577,9 @@ static void zend_file_cache_serialize_generic_parameter_list(
 	SERIALIZE_PTR(*list_ptr);
 	list = *list_ptr;
 	UNSERIALIZE_PTR(list);
+	/* The SHM monomorph-cache head is process-group state, meaningless in a
+	 * file-cache image; a raw SHM address would be garbage on load. */
+	list->monomorph_cache = NULL;
 	for (uint32_t i = 0; i < list->count; i++) {
 		SERIALIZE_STR(list->parameters[i].name);
 		zend_file_cache_serialize_type(&list->parameters[i].bound, script, info, buf);

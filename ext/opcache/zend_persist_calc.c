@@ -257,6 +257,11 @@ static void zend_persist_generic_parameter_list_calc(zend_generic_parameter_list
 	if (!list) {
 		return;
 	}
+	/* Mirror zend_persist_generic_parameter_list's shared-with-template
+	 * re-entry guard: already-SHM lists are kept, not re-persisted. */
+	if (!ZCG(current_persistent_script)->corrupted && zend_accel_in_shm(list)) {
+		return;
+	}
 
 	ADD_SIZE(ZEND_GENERIC_PARAMETER_LIST_SIZE(list->count));
 	for (uint32_t i = 0; i < list->count; i++) {
@@ -352,6 +357,10 @@ static void zend_persist_generic_type_table_calc(zend_generic_type_table *table)
 	if (!table) {
 		return;
 	}
+	/* Mirror zend_persist_generic_type_table's re-entry guard. */
+	if (!ZCG(current_persistent_script)->corrupted && zend_accel_in_shm(table)) {
+		return;
+	}
 
 	ADD_SIZE(sizeof(*table));
 	if (table->return_type) {
@@ -384,8 +393,26 @@ static void zend_persist_generic_type_table_calc(zend_generic_type_table *table)
 		zend_persist_generic_type_table_ht_calc(table->trait_uses);
 	}
 
-	if (table->turbofish_args) {
+	if (table->turbofish_args
+			/* Mirror persist: a fn-monomorph table borrows the template's
+			 * already-persisted turbofish_args — no reservation. */
+			&& !(!ZCG(current_persistent_script)->corrupted
+				&& zend_accel_in_shm(table->turbofish_args))) {
 		zend_persist_turbofish_args_ht_calc(table->turbofish_args);
+	}
+
+	if (table->monomorph_type_args) {
+		/* Mirror the runtime fn-monomorph table persist. */
+		zend_type_arg_table *mt = table->monomorph_type_args;
+		ADD_SIZE(ZEND_TYPE_ARG_TABLE_SIZE(mt->count));
+		for (uint32_t i = 0; i < mt->count; i++) {
+			if (mt->entries[i].name) {
+				ADD_INTERNED_STRING(mt->entries[i].name);
+			}
+			if (ZEND_TYPE_IS_SET(mt->entries[i].owned_type)) {
+				zend_persist_type_calc(&mt->entries[i].owned_type);
+			}
+		}
 	}
 
 	/* Mirror the value-check plan reservation in zend_persist_generic_type_table. */
@@ -620,6 +647,75 @@ static void zend_persist_op_array_calc(const zval *zv)
 	}
 }
 
+/* Size counterpart of zend_persist_monomorph_op_array_body: only what the
+ * monomorph OWNS is reserved; template-shared structures cost nothing. */
+static void zend_persist_monomorph_op_array_body_calc(zend_op_array *op_array)
+{
+	if (op_array->function_name) {
+		ADD_INTERNED_STRING(op_array->function_name);
+	}
+
+	if (op_array->static_variables && !zend_accel_in_shm(op_array->static_variables)) {
+		Bucket *p;
+		ADD_SIZE(sizeof(HashTable));
+		zend_hash_persist_calc(op_array->static_variables);
+		ZEND_HASH_MAP_FOREACH_BUCKET(op_array->static_variables, p) {
+			ZEND_ASSERT(p->key != NULL);
+			ADD_INTERNED_STRING(p->key);
+			zend_persist_zval_calc(&p->val);
+		} ZEND_HASH_FOREACH_END();
+	}
+
+	if (!zend_accel_in_shm(op_array->opcodes)) {
+		if (op_array->literals) {
+			ADD_SIZE(sizeof(zval) * op_array->last_literal);
+		}
+		ADD_SIZE(sizeof(zend_op) * op_array->last);
+	}
+
+	if (op_array->arg_info) {
+		zend_arg_info *arg_info = op_array->arg_info;
+		if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+			arg_info--;
+		}
+		if (!zend_accel_in_shm(arg_info)) {
+			uint32_t num_args = op_array->num_args;
+			if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+				num_args++;
+			}
+			if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+				num_args++;
+			}
+			ADD_SIZE(sizeof(zend_arg_info) * num_args);
+			for (uint32_t i = 0; i < num_args; i++) {
+				if (arg_info[i].name) {
+					ADD_INTERNED_STRING(arg_info[i].name);
+				}
+				zend_persist_type_calc(&arg_info[i].type);
+				if (arg_info[i].doc_comment) {
+					ADD_INTERNED_STRING(arg_info[i].doc_comment);
+				}
+			}
+		}
+	}
+
+	if (op_array->generic_parameters) {
+		zend_persist_generic_parameter_list_calc(op_array->generic_parameters);
+	}
+
+	if (op_array->generic_types) {
+		zend_persist_generic_type_table_calc(op_array->generic_types);
+	}
+}
+
+/* Size counterpart of zend_persist_monomorph_function. */
+void zend_persist_monomorph_function_calc(zend_function *func)
+{
+	ZEND_ASSERT(func->type == ZEND_USER_FUNCTION);
+	ADD_SIZE(sizeof(zend_op_array));
+	zend_persist_monomorph_op_array_body_calc(&func->op_array);
+}
+
 static void zend_persist_class_method_calc(zend_op_array *op_array)
 {
 	zend_op_array *old_op_array;
@@ -646,7 +742,13 @@ static void zend_persist_class_method_calc(zend_op_array *op_array)
 	old_op_array = zend_shared_alloc_get_xlat_entry(op_array);
 	if (!old_op_array) {
 		ADD_SIZE(sizeof(zend_op_array));
-		zend_persist_op_array_calc_ex(op_array);
+		if (ZCG(persisting_monomorph)
+		 && !zend_shared_alloc_get_xlat_entry(op_array->opcodes)) {
+			/* Mirror zend_persist_class_method's monomorph-clone branch. */
+			zend_persist_monomorph_op_array_body_calc(op_array);
+		} else {
+			zend_persist_op_array_calc_ex(op_array);
+		}
 		zend_shared_alloc_register_xlat_entry(op_array, op_array);
 	} else {
 		/* If op_array is shared, the function name refcount is still incremented for each use,

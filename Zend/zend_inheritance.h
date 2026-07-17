@@ -142,6 +142,17 @@ void zend_check_function_variance_markers(zend_op_array *op_array);
 ZEND_API extern zend_class_entry* (*zend_inheritance_cache_get)(zend_class_entry *ce, zend_class_entry *parent, zend_class_entry **traits_and_interfaces);
 ZEND_API extern zend_class_entry* (*zend_inheritance_cache_add)(zend_class_entry *ce, zend_class_entry *proto, zend_class_entry *parent, zend_class_entry **traits_and_interfaces, HashTable *dependencies);
 
+/* Opcache SHM cache for runtime-synthesized generic monomorphs, keyed on the
+ * template's generic_parameters list + the monomorph's lowercased canonical
+ * name (mirrors the inheritance cache: get is lock-free, add persists the
+ * linked monomorph into SHM and returns the immutable copy, or NULL when SHM
+ * is unavailable/full — the caller then keeps the per-request arena version).
+ * The class pair caches zend_class_entry*, the fn pair zend_function*. */
+ZEND_API extern zend_class_entry* (*zend_monomorph_cache_get)(zend_class_entry *base, zend_string *lc_name);
+ZEND_API extern zend_class_entry* (*zend_monomorph_cache_add)(zend_class_entry *base, zend_string *lc_name, zend_class_entry *mono);
+ZEND_API extern zend_function* (*zend_fn_monomorph_cache_get)(zend_function *base, zend_string *lc_name);
+ZEND_API extern zend_function* (*zend_fn_monomorph_cache_add)(zend_function *base, zend_string *lc_name, zend_function *mono);
+
 ZEND_API zend_inheritance_status zend_verify_property_hook_variance(const zend_property_info *prop_info, const zend_function *func);
 ZEND_API ZEND_COLD ZEND_NORETURN void zend_hooked_property_variance_error(const zend_property_info *prop_info);
 ZEND_API ZEND_COLD ZEND_NORETURN void zend_hooked_property_variance_error_ex(zend_string *value_param_name, zend_string *class_name, zend_string *prop_name);

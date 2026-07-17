@@ -149,6 +149,13 @@ typedef struct _zend_generic_parameter {
 typedef struct _zend_generic_parameter_list {
 	uint32_t count;
 	bool     persisted;             /* set by opcache when the list lives in SHM/file-cache memory; suppresses destruction (mirrors zend_generic_type_table.persisted) */
+	/* Head of opcache's SHM monomorph cache for this template (opaque to the
+	 * engine; see zend_accel_monomorph_cache_get/add). Anchored here — rather
+	 * than globally — so cached monomorphs die with their template when the
+	 * declaring script is invalidated, exactly like the inheritance cache.
+	 * Written at runtime under the SHM allocator lock; NULL outside opcache
+	 * SHM (arena/file-cache copies). */
+	void    *monomorph_cache;
 	zend_generic_parameter parameters[1];
 } zend_generic_parameter_list;
 
@@ -254,6 +261,13 @@ typedef struct _zend_type_arg_table {
 	 * as part of a persisted class entry's `generic_type_args`. Tells the
 	 * destroy path to leave the table and its name/type contents alone. */
 	bool persisted;
+	/* True only when the table's memory actually lives in opcache SHM
+	 * (`persisted` is also set on request-local monomorph tables purely to
+	 * suppress frame teardown, so it cannot answer residence questions).
+	 * destroy_op_array's monomorph name/type release must skip SHM tables:
+	 * a closure over a persisted monomorph memcpy's the op_array (clearing
+	 * IMMUTABLE), and writing entry slots in protected SHM segfaults. */
+	bool shm;
 	zend_type_arg_entry entries[1];
 } zend_type_arg_table;
 

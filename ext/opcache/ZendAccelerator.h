@@ -200,6 +200,7 @@ typedef struct _zend_accel_globals {
 	bool               locked;    /* thread obtained exclusive lock */
 	bool               accelerator_enabled; /* accelerator enabled for current request */
 	bool               pcre_reseted;
+	bool               persisting_monomorph; /* inside a runtime generic-monomorph persist (calc or store phase): every non-SHM method is a template-sharing clone */
 	zend_accel_directives   accel_directives;
 	zend_string            *cwd;                  /* current working directory or NULL */
 	zend_string            *include_path;         /* current value of "include_path" directive */
