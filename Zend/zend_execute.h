@@ -461,6 +461,36 @@ static zend_always_inline void zend_vm_stack_free_call_frame(zend_execute_data *
 	zend_vm_stack_free_call_frame_ex(ZEND_CALL_INFO(call), call);
 }
 
+/* Tears down a not-yet-entered call frame whose speculative generic-argument
+ * check (zend_verify_speculative_generic_call) threw, before the callee ever
+ * ran: frees the already-pushed argument zvals, releases the closure/trampoline
+ * object the frame holds a reference on (if any), and frees the frame itself.
+ * Does NOT touch EX(call)/EX(opline) or the result slot -- callers are
+ * responsible for advancing EX(call) = call->prev_execute_data and marking the
+ * result UNDEF (interpreter: UNDEF_RESULT(); JIT: EX_VAR(opline->result.var))
+ * themselves, since the exact mechanics differ. Advancing EX(call) before the
+ * standard unwinder runs (HANDLE_EXCEPTION() / cleanup_unfinished_calls) is
+ * required: otherwise the unwinder's backward scan is confused between "this
+ * call frame is still open" (true only before this speculative check) and
+ * "this DO_FCALL-family opline belongs to an already-completed nested call
+ * whose failure is unwinding through an enclosing pending call" (the ordinary
+ * case, where EX(call) already refers to that enclosing call). */
+static zend_always_inline void zend_cleanup_unentered_speculative_call(zend_execute_data *call)
+{
+	zend_vm_stack_free_args(call);
+	if (UNEXPECTED(call->func->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE)) {
+		zend_string_release_ex(call->func->common.function_name, 0);
+		zend_free_trampoline(call->func);
+	}
+	if (UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_CLOSURE)) {
+		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(call->func));
+	}
+	if (UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS)) {
+		OBJ_RELEASE(Z_OBJ(call->This));
+	}
+	zend_vm_stack_free_call_frame(call);
+}
+
 zend_execute_data *zend_vm_stack_copy_call_frame(
 	zend_execute_data *call, uint32_t passed_args, uint32_t additional_args);
 

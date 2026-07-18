@@ -1584,6 +1584,52 @@ ZEND_API void zend_check_generic_call_arguments(const zend_function *fbc, uint32
 	}
 }
 
+/* Uncached equivalent of ZEND_VERIFY_GENERIC_ARGUMENTS' speculative
+ * (no-turbofish) path, for a naked call whose resolved callee turned out to
+ * be generic. No VERIFY opcode is ever emitted for a naked CALL site (see
+ * zend_emit_verify_generic_arguments) -- the compiler cannot statically
+ * rule out genericity for the dominant case (a polymorphic method call,
+ * where fbc is unknown), so instead of a dedicated opcode this check runs
+ * unconditionally, inline, in DO_FCALL / DO_FCALL_BY_NAME / DO_UCALL. It is
+ * a correctness requirement, not just an optimization: a naked call to a
+ * generic function is legal exactly when every type parameter has a
+ * declared default, and without this the callee's body would never see
+ * call->type_args populated.
+ *
+ * Deliberately skips the monomorphization/promotion caching a dedicated
+ * opcode's per-call-site cache slots would otherwise provide -- this path
+ * is for the narrower case of a naked call to a generic function (relying
+ * entirely on declared defaults), so redoing the arity/defaults-table work
+ * every call is an acceptable, self-contained trade for keeping every
+ * non-generic call (the overwhelming majority) free of the extra opcode
+ * dispatch a dedicated VERIFY would otherwise cost on every single call.
+ *
+ * Must be called with the pending call frame still fully linked (i.e.
+ * before the caller has advanced EX(call) away from it), matching
+ * ZEND_VERIFY_GENERIC_ARGUMENTS' own "still-open call region" invariant:
+ * on a thrown TypeError/ArgumentCountError, the standard exception
+ * unwinder (reached via HANDLE_EXCEPTION in the caller) must still find
+ * this frame via EX(call) to release it correctly. */
+ZEND_API void zend_verify_speculative_generic_call(zend_execute_data *call)
+{
+	zend_check_generic_call_arguments(call->func, 0, NULL, call->type_args);
+	if (UNEXPECTED(EG(exception))) {
+		return;
+	}
+	if (!call->type_args) {
+		/* A frame that already carries a table with no turbofish at this
+		 * site (closure with captured bindings, monomorph by-name dispatch)
+		 * keeps it -- rebuilding here would overwrite the captured bindings
+		 * with a defaults-only table. Mirrors the equivalent check in
+		 * ZEND_VERIFY_GENERIC_ARGUMENTS. */
+		zend_type_arg_table *t = zend_build_or_get_cached_type_args(call, NULL, NULL);
+		if (t) {
+			call->type_args = t;
+		}
+	}
+	zend_verify_generic_arg_types(call, NULL);
+}
+
 ZEND_API void zend_check_generic_new_arguments(const zend_class_entry *ce, uint32_t arity, const zend_type *args_box)
 {
 	uint32_t required, total;
@@ -1808,6 +1854,23 @@ static void zend_emit_verify_generic_arguments(zend_ast *turbofish_ast, uint8_t 
 					required);
 			}
 		}
+		/* No opcode at all: a naked CALL site (turbofish never parsed here)
+		 * needs, at most, the arity==0-vs-required/defaults check plus a
+		 * defaults-table install — both now handled inline by DO_FCALL and
+		 * DO_FCALL_BY_NAME (zend_verify_speculative_generic_call), which run
+		 * unconditionally on every call anyway. This removes the separate
+		 * ZEND_VERIFY_GENERIC_ARGUMENTS opcode (and its dispatch cost) from
+		 * every non-turbofish call site -- overwhelmingly the dominant case,
+		 * since most method calls can't have fbc statically resolved (see
+		 * zend_compile_method_call) and so always reached this branch
+		 * regardless of whether generics are used anywhere in the program.
+		 * The trade: a naked call to a generic function (legal only when
+		 * every type parameter has a declared default) now redoes the
+		 * arity/defaults-table work on every call instead of using the
+		 * per-call-site cache slots a dedicated opcode would carry — an
+		 * intentionally uncached fallback for a narrower case, in exchange
+		 * for zero opcode overhead on the non-generic path. */
+		return;
 	}
 
 	/* Replace the runtime VERIFY with INSTALL when arity+bound check is

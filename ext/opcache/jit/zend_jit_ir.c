@@ -3129,6 +3129,7 @@ static void zend_jit_setup_disasm(void)
 	REGISTER_HELPER(zend_jit_free_trampoline_helper);
 	REGISTER_HELPER(zend_jit_verify_return_slow);
 	REGISTER_HELPER(zend_jit_deprecated_helper);
+	REGISTER_HELPER(zend_jit_verify_speculative_generic_call_helper);
 	REGISTER_HELPER(zend_jit_undefined_long_key);
 	REGISTER_HELPER(zend_jit_undefined_long_key_ex);
 	REGISTER_HELPER(zend_jit_undefined_string_key);
@@ -10272,6 +10273,67 @@ static int zend_jit_do_fcall(zend_jit_ctx *jit, const zend_op *opline, const zen
 				}
 				ir_GUARD(ret, jit_STUB_ADDR(jit, jit_stub_exception_handler));
 			}
+		}
+	}
+
+	/* A naked (no turbofish) call site never gets a VERIFY_GENERIC_ARGUMENTS
+	 * opcode (see zend_emit_verify_generic_arguments) -- DO_FCALL,
+	 * DO_FCALL_BY_NAME and (unlike the deprecated/nodiscard check just
+	 * above) DO_UCALL all need this: a naked call to a statically-known,
+	 * fully-defaulted generic function is exactly the shape that routes to
+	 * DO_UCALL (zend_get_call_op only special-cases DEPRECATED/NODISCARD,
+	 * not genericity). This is the JIT counterpart of the same check the
+	 * interpreter's C handlers run inline (zend_vm_def.h) -- JIT has its
+	 * own, separate native-codegen for these opcodes, so nothing here
+	 * happens just because the interpreter's handler gained this logic. */
+	if (opline->opcode == ZEND_DO_FCALL
+	 || opline->opcode == ZEND_DO_FCALL_BY_NAME
+	 || opline->opcode == ZEND_DO_UCALL) {
+		if (!func) {
+			/* Only reachable for DO_FCALL/DO_FCALL_BY_NAME -- DO_UCALL
+			 * always has a statically-known func. Mirrors the !trace guard
+			 * on the deprecated/nodiscard "unknown func" case just above:
+			 * under tracing, an unresolvable callee already exits the
+			 * trace back to the interpreter before reaching this point
+			 * (see the trace exit-point handling earlier in this
+			 * function), and generic op_arrays are excluded from JIT
+			 * compilation entirely (zend_jit_op_array_is_generic_shared),
+			 * so a traced call's own generic_parameters is never reachable
+			 * here either way. */
+			if (!trace) {
+				ir_ref if_user_g, if_generic, gp_ref, ret;
+				ir_ref type_ref = ir_LOAD_U8(ir_ADD_OFFSET(func_ref, offsetof(zend_function, type)));
+
+				if_user_g = ir_IF(ir_EQ(type_ref, ir_CONST_U8(ZEND_USER_FUNCTION)));
+				ir_IF_TRUE_cold(if_user_g);
+
+				gp_ref = ir_LOAD_A(ir_ADD_OFFSET(func_ref, offsetof(zend_function, op_array.generic_parameters)));
+				if_generic = ir_IF(gp_ref);
+				ir_IF_TRUE_cold(if_generic);
+
+				if (GCC_GLOBAL_REGS) {
+					ret = ir_CALL(IR_BOOL, ir_CONST_FC_FUNC(zend_jit_verify_speculative_generic_call_helper));
+				} else {
+					ret = ir_CALL_1(IR_BOOL, ir_CONST_FC_FUNC(zend_jit_verify_speculative_generic_call_helper), rx);
+				}
+				ir_GUARD(ret, jit_STUB_ADDR(jit, jit_stub_exception_handler));
+
+				ir_MERGE_WITH_EMPTY_FALSE(if_generic);
+				ir_MERGE_WITH_EMPTY_FALSE(if_user_g);
+			}
+		} else if (ZEND_USER_CODE(func->type) && func->op_array.generic_parameters) {
+			/* Callee statically known and generic: only reachable for a
+			 * naked call when every type parameter has a declared default
+			 * (anything else is a compile-time error). No runtime branch
+			 * needed -- func is a compile-time constant here. */
+			ir_ref ret;
+
+			if (GCC_GLOBAL_REGS) {
+				ret = ir_CALL(IR_BOOL, ir_CONST_FC_FUNC(zend_jit_verify_speculative_generic_call_helper));
+			} else {
+				ret = ir_CALL_1(IR_BOOL, ir_CONST_FC_FUNC(zend_jit_verify_speculative_generic_call_helper), rx);
+			}
+			ir_GUARD(ret, jit_STUB_ADDR(jit, jit_stub_exception_handler));
 		}
 	}
 

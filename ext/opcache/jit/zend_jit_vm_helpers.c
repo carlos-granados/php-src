@@ -334,6 +334,47 @@ bool ZEND_FASTCALL zend_jit_deprecated_nodiscard_helper(OPLINE_D)
 	return true;
 }
 
+/* JIT counterpart of the naked-generic-call check zend_jit_do_fcall() inlines
+ * into DO_FCALL/DO_UCALL/DO_FCALL_BY_NAME's compiled code (see
+ * zend_jit_ir.c) -- a naked (no turbofish) call site never gets a
+ * VERIFY_GENERIC_ARGUMENTS opcode (zend_emit_verify_generic_arguments), so
+ * the interpreter's matching DO_*CALL handlers check inline instead
+ * (zend_vm_def.h). JIT has its own, separate native-codegen implementation
+ * of these opcodes, so it needs this same check called out to explicitly;
+ * nothing here happens implicitly just because the interpreter's C handler
+ * changed. Manual cleanup on exception, not reliance on EX(call) + the
+ * standard unwinder, mirrors zend_jit_deprecated_helper/zend_jit_nodiscard_helper
+ * immediately above -- unlike the interpreter (which runs this before
+ * EX(call) is advanced, letting cleanup_unfinished_calls find the pending
+ * frame normally), this may run after the JIT's own "EX(call) = call->
+ * prev_execute_data" store, so it must not depend on that. */
+bool ZEND_FASTCALL zend_jit_verify_speculative_generic_call_helper(OPLINE_D)
+{
+	zend_execute_data *call = (zend_execute_data *) opline;
+
+	zend_verify_speculative_generic_call(call);
+
+	if (UNEXPECTED(EG(exception))) {
+#ifndef HAVE_GCC_GLOBAL_REGS
+		zend_execute_data *execute_data = EG(current_execute_data);
+#endif
+		const zend_op *opline = EG(opline_before_exception);
+		if (opline && RETURN_VALUE_USED(opline)) {
+			ZVAL_UNDEF(EX_VAR(opline->result.var));
+		}
+
+		zend_vm_stack_free_args(call);
+
+		if (UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS)) {
+			OBJ_RELEASE(Z_OBJ(call->This));
+		}
+
+		zend_vm_stack_free_call_frame(call);
+		return false;
+	}
+	return true;
+}
+
 void ZEND_FASTCALL zend_jit_undefined_long_key(EXECUTE_DATA_D)
 {
 	const zend_op *opline = EX(opline);

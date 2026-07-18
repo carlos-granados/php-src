@@ -4227,6 +4227,25 @@ ZEND_VM_HOT_HANDLER(130, ZEND_DO_UCALL, ANY, ANY, SPEC(RETVAL,OBSERVER))
 	zval *ret;
 
 	SAVE_OPLINE();
+
+	/* A naked (no turbofish) call site never gets a VERIFY_GENERIC_ARGUMENTS
+	 * opcode (see zend_emit_verify_generic_arguments) -- reached here only
+	 * when fbc is statically known AND generic AND every type parameter has
+	 * a declared default (anything else is a compile-time error). Must run
+	 * before EX(call) is advanced. On failure, tear the call down manually
+	 * and advance EX(call) here ourselves -- see the matching comment in
+	 * ZEND_DO_FCALL for why the standard unwinder can't be trusted with this
+	 * call still "open". */
+	if (UNEXPECTED(fbc->op_array.generic_parameters)) {
+		zend_verify_speculative_generic_call(call);
+		if (UNEXPECTED(EG(exception))) {
+			zend_cleanup_unentered_speculative_call(call);
+			EX(call) = call->prev_execute_data;
+			UNDEF_RESULT();
+			HANDLE_EXCEPTION();
+		}
+	}
+
 	EX(call) = call->prev_execute_data;
 
 	ret = NULL;
@@ -4253,6 +4272,25 @@ ZEND_VM_HOT_HANDLER(131, ZEND_DO_FCALL_BY_NAME, ANY, ANY, SPEC(RETVAL,OBSERVER))
 	zval retval;
 
 	SAVE_OPLINE();
+
+	/* A naked (no turbofish) call site never gets a VERIFY_GENERIC_ARGUMENTS
+	 * opcode (see zend_emit_verify_generic_arguments) -- this covers a
+	 * forward-referenced named function call whose resolved callee turns
+	 * out to be a (necessarily all-defaulted) generic function. Internal
+	 * functions can't be generic, hence the type guard before touching the
+	 * op_array union member. Must run before EX(call) is advanced. On
+	 * failure, tear the call down manually and advance EX(call) here
+	 * ourselves -- see the matching comment in ZEND_DO_FCALL. */
+	if (UNEXPECTED(ZEND_USER_CODE(fbc->type) && fbc->op_array.generic_parameters)) {
+		zend_verify_speculative_generic_call(call);
+		if (UNEXPECTED(EG(exception))) {
+			zend_cleanup_unentered_speculative_call(call);
+			EX(call) = call->prev_execute_data;
+			UNDEF_RESULT();
+			HANDLE_EXCEPTION();
+		}
+	}
+
 	EX(call) = call->prev_execute_data;
 
 	const uint32_t no_discard = RETURN_VALUE_USED(opline) ? 0 : ZEND_ACC_NODISCARD;
@@ -4369,6 +4407,33 @@ ZEND_VM_HOT_HANDLER(60, ZEND_DO_FCALL, ANY, ANY, SPEC(RETVAL,OBSERVER))
 	zval retval;
 
 	SAVE_OPLINE();
+
+	/* A naked (no turbofish) call site never gets a VERIFY_GENERIC_ARGUMENTS
+	 * opcode (see zend_emit_verify_generic_arguments) -- DO_FCALL is the
+	 * dominant target for this: it's what a polymorphic method call, a
+	 * call_user_func(_array)() call, or any other callee unresolvable at
+	 * compile time compiles to (zend_get_call_op falls through to it
+	 * whenever fbc is unknown). Internal functions can't be generic, hence
+	 * the type guard. Independent of, and unaffected by, the closure
+	 * captured-T check further down: this runs first, before EX(call) is
+	 * advanced. On failure this call is torn down manually and EX(call) is
+	 * advanced here (matching what the deprecated/nodiscard block below
+	 * does), rather than left for the standard unwinder: this call is still
+	 * "open" (unlike every other exception path in this handler, which runs
+	 * after EX(call) has already moved past it), and cleanup_unfinished_calls
+	 * has no way to tell that case apart from an already-completed nested
+	 * call unwinding through an enclosing pending one -- see the DO_FCALL/
+	 * DO_UCALL/DO_FCALL_BY_NAME entries in that function's history. */
+	if (UNEXPECTED(ZEND_USER_CODE(fbc->type) && fbc->op_array.generic_parameters)) {
+		zend_verify_speculative_generic_call(call);
+		if (UNEXPECTED(EG(exception))) {
+			zend_cleanup_unentered_speculative_call(call);
+			EX(call) = call->prev_execute_data;
+			UNDEF_RESULT();
+			HANDLE_EXCEPTION();
+		}
+	}
+
 	EX(call) = call->prev_execute_data;
 
 	const uint32_t no_discard = RETURN_VALUE_USED(opline) ? 0 : ZEND_ACC_NODISCARD;
