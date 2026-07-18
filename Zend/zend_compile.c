@@ -4873,7 +4873,94 @@ static void zend_compile_memoized_expr(znode *result, zend_ast *expr, uint32_t t
 }
 /* }}} */
 
+static bool is_this_fetch(const zend_ast *ast);
+
+/* Detect `return $this->prop;` where the property's own declared type and
+ * this method's declared return type are BOTH bare references to the same
+ * class-level type parameter. For every possible monomorph binding the two
+ * are then substituted identically, so the property's own type check --
+ * unconditionally enforced on every write, exactly like any ordinary typed
+ * property -- has already validated this exact value; re-verifying it here
+ * on return is provably redundant, the same way PHP's optimizer already
+ * elides a redundant VERIFY_RETURN_TYPE for a plain (non-generic) typed-
+ * property getter (confirmed by inspecting `opcache.opt_debug_level` output
+ * for `function get(): User { return $this->value; }` -- no such opcode
+ * survives optimization there). The generic case can't get that same
+ * optimizer pass: a class's methods are compiled once, before any concrete
+ * T is known, so VERIFY_RETURN_TYPE has to stay in the shared body for
+ * every future monomorph to substitute its own binding into (see
+ * `return_is_generic` above) -- unless, as here, the check is redundant
+ * for EVERY possible binding, not just one.
+ *
+ * Deliberately conservative: only a directly-declared (not inherited),
+ * hookless property, referenced with a literal (not dynamic) name, with
+ * matching nullability, on a non-by-ref return. Any of those complicate
+ * the "write always validates what read returns" guarantee enough that
+ * it's not worth trying to reason through here -- missing the optimization
+ * is safe, applying it incorrectly is not. */
+static bool zend_return_reuses_checked_property_type(
+		const zend_ast *expr_ast, const zend_type *pre_return)
+{
+	if (!expr_ast || expr_ast->kind != ZEND_AST_PROP) {
+		return false;
+	}
+	if (CG(active_op_array)->fn_flags & ZEND_ACC_RETURN_REFERENCE) {
+		return false;
+	}
+	if (!pre_return || !ZEND_TYPE_IS_SET(*pre_return) || !ZEND_TYPE_HAS_TYPE_PARAMETER(*pre_return)) {
+		return false;
+	}
+	const zend_type_parameter_ref *ret_ref = ZEND_TYPE_TYPE_PARAMETER(*pre_return);
+	if (ret_ref->origin != ZEND_GENERIC_ORIGIN_CLASS_LIKE) {
+		return false;
+	}
+
+	zend_ast *obj_ast = expr_ast->child[0];
+	zend_ast *prop_ast = expr_ast->child[1];
+	if (!is_this_fetch(obj_ast)) {
+		return false;
+	}
+	if (prop_ast->kind != ZEND_AST_ZVAL || Z_TYPE_P(zend_ast_get_zval(prop_ast)) != IS_STRING) {
+		/* Dynamic property name ($this->{$expr}) -- can't prove statically. */
+		return false;
+	}
+
+	zend_class_entry *ce = CG(active_class_entry);
+	if (!ce || !ce->generic_types || !ce->generic_types->properties) {
+		return false;
+	}
+	zend_string *prop_name = Z_STR_P(zend_ast_get_zval(prop_ast));
+	zend_property_info *prop_info = zend_hash_find_ptr(&ce->properties_info, prop_name);
+	if (!prop_info || prop_info->ce != ce) {
+		/* Not declared directly on this class -- stay conservative rather
+		 * than chase the inheritance/substitution chain here. */
+		return false;
+	}
+	if (prop_info->hooks) {
+		/* A get-hook may return something other than the raw stored value;
+		 * the declared type no longer guarantees what a fetch returns. */
+		return false;
+	}
+	zval *pre_zv = zend_hash_find(ce->generic_types->properties, prop_name);
+	if (!pre_zv) {
+		return false;
+	}
+	const zend_type *pre_prop = (const zend_type *) Z_PTR_P(pre_zv);
+	if (!ZEND_TYPE_IS_SET(*pre_prop) || !ZEND_TYPE_HAS_TYPE_PARAMETER(*pre_prop)) {
+		return false;
+	}
+	const zend_type_parameter_ref *prop_ref = ZEND_TYPE_TYPE_PARAMETER(*pre_prop);
+	if (prop_ref->origin != ZEND_GENERIC_ORIGIN_CLASS_LIKE || prop_ref->index != ret_ref->index) {
+		return false;
+	}
+	if (ZEND_TYPE_ALLOW_NULL(*pre_prop) != ZEND_TYPE_ALLOW_NULL(*pre_return)) {
+		return false;
+	}
+	return true;
+}
+
 static void zend_emit_return_type_check(
+		const zend_ast *expr_ast,
 		znode *expr, const zend_arg_info *return_info, bool implicit) /* {{{ */
 {
 	zend_type type = return_info->type;
@@ -4931,6 +5018,13 @@ static void zend_emit_return_type_check(
 			&& (ZEND_TYPE_HAS_TYPE_PARAMETER(*pre_return)
 				|| zend_type_is_reifiable_leaf_composite(*pre_return));
 
+		if (return_is_generic
+				&& zend_return_reuses_checked_property_type(expr_ast, pre_return)) {
+			/* Redundant for every possible binding, not just this one --
+			 * see zend_return_reuses_checked_property_type. */
+			return;
+		}
+
 		if (expr && ZEND_TYPE_PURE_MASK(type) == MAY_BE_ANY) {
 			/* Mixed normally needs no run-time check, but if the return is a
 			 * generic parameter that erased to mixed, a child substituting T to
@@ -4972,7 +5066,7 @@ void zend_emit_final_return(bool return_one) /* {{{ */
 			return;
 		}
 
-		zend_emit_return_type_check(NULL, return_info, true);
+		zend_emit_return_type_check(NULL, NULL, return_info, true);
 	}
 
 	zn.op_type = IS_CONST;
@@ -8674,7 +8768,7 @@ static void zend_compile_return(const zend_ast *ast) /* {{{ */
 	/* Generator return types are handled separately */
 	if (!is_generator && (CG(active_op_array)->fn_flags & ZEND_ACC_HAS_RETURN_TYPE)) {
 		zend_emit_return_type_check(
-			expr_ast ? &expr_node : NULL, CG(active_op_array)->arg_info - 1, false);
+			expr_ast, expr_ast ? &expr_node : NULL, CG(active_op_array)->arg_info - 1, false);
 	}
 
 	uint32_t opnum_before_finally = get_next_op_number();
@@ -8688,7 +8782,7 @@ static void zend_compile_return(const zend_ast *ast) /* {{{ */
 	 && !is_generator
 	 && (CG(active_op_array)->fn_flags & ZEND_ACC_HAS_RETURN_TYPE)) {
 		zend_emit_return_type_check(
-			expr_ast ? &expr_node : NULL, CG(active_op_array)->arg_info - 1, false);
+			expr_ast, expr_ast ? &expr_node : NULL, CG(active_op_array)->arg_info - 1, false);
 	}
 
 	opline = zend_emit_op(NULL, by_ref ? ZEND_RETURN_BY_REF : ZEND_RETURN,

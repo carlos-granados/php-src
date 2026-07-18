@@ -3038,6 +3038,20 @@ static void do_inherit_property(zend_property_info *parent_info, zend_string *ke
 								clone_fn->op_array.arg_info = new_arg_info + 1;
 								function_add_ref(clone_fn);
 
+								/* Same private, arena-owned arg_info block as
+								 * an ordinary generic method clone (see the
+								 * GENERIC_ARGINFO_CLONE release block in
+								 * destroy_op_array) -- zend_clone_arg_info_block
+								 * addref'd/copy_ctor'd every slot's name/type,
+								 * and this hook clone is the only owner. Without
+								 * this flag destroy_op_array never releases
+								 * them (the shared body's refcount keeps it from
+								 * reaching the normal arg_info release either),
+								 * leaking one zend_type/name per hooked,
+								 * generically-substituted property. */
+								clone_fn->common.fn_flags2 |= ZEND_ACC2_GENERIC_ARGINFO_CLONE;
+								clone_fn->common.fn_flags &= ~ZEND_ACC_IMMUTABLE;
+
 								clone_hooks[hi] = clone_fn;
 							}
 
