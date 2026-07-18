@@ -7104,14 +7104,29 @@ static zend_type zend_monomorph_dup_type(zend_type t)
 static zend_type zend_monomorph_build_extends_payload(
 	zend_class_entry *base, const zend_type *args, uint32_t arity)
 {
+	/* zend_type (Zend/zend_types.h) has an explicit 4 bytes of unused padding
+	 * after `type_mask` on 64-bit systems ("TODO: We could use the extra
+	 * 32-bit of padding" -- upstream's own comment). Struct ASSIGNMENT/
+	 * COPY-INITIALIZATION of a zend_type (both `payload->args[i] = ...`
+	 * below and `zend_type result = ZEND_TYPE_INIT_NONE(0)` further down)
+	 * copies the named fields but doesn't reliably touch that padding gap --
+	 * confirmed empirically to persist through zend_file_cache_serialize's
+	 * own struct copies even when the destination buffer was pre-zeroed, so
+	 * fixing it once at the file-cache write chokepoint (see zend_file_cache.c)
+	 * isn't sufficient on its own; it has to be zeroed at the source. Harmless
+	 * either way (the padding is never read back), but flagged by valgrind as
+	 * an "uninitialised byte(s)" warning wherever a value carrying it gets
+	 * written out. */
 	zend_type_named_with_args *payload = emalloc(ZEND_TYPE_NAMED_WITH_ARGS_SIZE(arity));
+	memset(payload, 0, ZEND_TYPE_NAMED_WITH_ARGS_SIZE(arity));
 	payload->name = zend_string_copy(base->name);
 	payload->name_attr = 0;
 	payload->count = arity;
 	for (uint32_t i = 0; i < arity; i++) {
 		payload->args[i] = zend_monomorph_dup_type(args[i]);
 	}
-	zend_type result = ZEND_TYPE_INIT_NONE(0);
+	zend_type result;
+	memset(&result, 0, sizeof(result));
 	ZEND_TYPE_SET_PTR(result, payload);
 	ZEND_TYPE_FULL_MASK(result) |= _ZEND_TYPE_NAMED_WITH_ARGS_BIT;
 	return result;

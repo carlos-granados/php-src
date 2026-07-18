@@ -1355,6 +1355,14 @@ int zend_file_cache_script_store(zend_persistent_script *script, bool in_shm)
 	zend_file_cache_metainfo info;
 	void *mem, *buf;
 
+	/* Struct padding after `checksum` (needed for 8-byte alignment of the
+	 * size_t/accel_time_t members) is never touched by the field assignments
+	 * below, but sizeof(info) -- padding included -- is what gets written to
+	 * the cache file via writev() in zend_file_cache_script_write(). See the
+	 * matching comment on the `buf` memset further down for why this is
+	 * harmless but worth silencing anyway. */
+	memset(&info, 0, sizeof(info));
+
 #ifdef HAVE_JIT
 	/* FIXME: dump jited codes out to file cache? */
 	if (JIT_G(on)) {
@@ -1396,6 +1404,25 @@ int zend_file_cache_script_store(zend_persistent_script *script, bool in_shm)
 #else
 	mem = buf = emalloc(script->size);
 #endif
+
+	/* zend_file_cache_serialize() below fills `buf` with struct-copies of
+	 * countless small values (zend_type among them) whose C-level struct
+	 * assignment isn't guaranteed to touch inter-field padding bytes (e.g.
+	 * zend_type has 4 explicitly-documented, currently-unused padding bytes
+	 * on 64-bit systems -- see its definition in zend_types.h). Those gaps
+	 * are genuinely harmless (never read back when loading the cache -- see
+	 * the __msan_unpoison note below, which already says as much for
+	 * MemorySanitizer builds) but are written verbatim to the cache file via
+	 * writev() in zend_file_cache_script_write(), which valgrind flags as an
+	 * "uninitialised byte(s)" warning on every store. Rather than track down
+	 * and memset every individual struct that can leave such a gap (a
+	 * whack-a-mole with no natural stopping point -- this same
+	 * ZEND_TYPE_INIT_NONE()-into-a-local-variable pattern recurs throughout
+	 * the compiler and inheritance code), zero the WHOLE destination buffer
+	 * once, here, before anything gets serialized into it: any padding gap
+	 * left by ANY producer downstream then reads back as predictable zero
+	 * filler instead of stack/heap garbage. */
+	memset(buf, 0, script->size);
 
 	ZCG(mem) = zend_string_alloc(4096 - (_ZSTR_HEADER_SIZE + 1), 0);
 

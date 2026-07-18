@@ -2292,7 +2292,21 @@ static zend_type zend_compile_pre_erasure_typename(zend_ast *ast)
 		ZEND_TYPE_FULL_MASK(result) |= _ZEND_TYPE_NULLABLE_BIT;
 	}
 	ast->attr = orig_attr;
-	return result;
+
+	/* `result` may have been fully reassigned (not just field-updated via
+	 * ZEND_TYPE_SET_PTR/FULL_MASK) by several branches above, each from its
+	 * own compound-literal or recursive-call source -- any of which can
+	 * carry zend_type's undefined inter-field padding (see the comment on
+	 * zend_monomorph_build_extends_payload in zend_inheritance.c for why
+	 * this is real, harmless, but valgrind-visible). Rather than chase every
+	 * branch's own source, reconstruct a guaranteed-zero-padding value here,
+	 * once, via direct FIELD assignment (not a struct-level copy) of just
+	 * the two named fields. */
+	zend_type clean;
+	memset(&clean, 0, sizeof(clean));
+	clean.ptr = result.ptr;
+	clean.type_mask = result.type_mask;
+	return clean;
 }
 
 /* Ensure op_array->generic_types is allocated, then return it. */
