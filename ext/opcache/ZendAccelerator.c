@@ -4628,6 +4628,22 @@ static void preload_fix_trait_op_array(zend_op_array *op_array)
 		return;
 	}
 
+	if (op_array->fn_flags2 & ZEND_ACC2_GENERIC_ARGINFO_CLONE) {
+		/* A generic monomorph method clone is marked ZEND_ACC_TRAIT_CLONE
+		 * to reuse trait-clone infrastructure elsewhere (opcache persistence,
+		 * the RECV slow path -- see zend_maybe_substitute_inherited_method),
+		 * but it is NOT a genuine trait clone: for an actual trait, `use`
+		 * never substitutes types, so a per-using-class clone's arg_info is
+		 * byte-identical to the trait's original and restoring it from the
+		 * canonical xlat entry below is a no-op. For a generic monomorph,
+		 * arg_info is the tightened, PER-BINDING substituted type table --
+		 * the entire reason the clone exists -- and the unconditional
+		 * `*op_array = *orig_op_array` below would blow it away, silently
+		 * reverting the clone to the template's erased (T-generic) checks.
+		 * Nothing here needs canonicalizing against the template. */
+		return;
+	}
+
 	const zend_op_array *orig_op_array = zend_shared_alloc_get_xlat_entry(op_array->refcount);
 	ZEND_ASSERT(orig_op_array && "Must be in xlat table");
 
@@ -4677,14 +4693,22 @@ static void preload_optimize(zend_persistent_script *script)
 	zend_shared_alloc_init_xlat_table();
 
 	ZEND_HASH_MAP_FOREACH_PTR(&script->script.class_table, ce) {
-		if (ce->ce_flags & ZEND_ACC_TRAIT) {
+		/* A generic template class's methods are also cloned (with tightened,
+		 * substituted arg_info) onto every monomorph instantiated during
+		 * preload, sharing the template method's refcount and marked
+		 * ZEND_ACC_TRAIT_CLONE (see zend_maybe_substitute_inherited_method)
+		 * so opcache persistence and RECV treat them like a trait-method
+		 * clone. Those clones need their origin registered in the xlat
+		 * table the exact same way an actual trait's methods are, or
+		 * preload_fix_trait_op_array's lookup below fails its assertion. */
+		if ((ce->ce_flags & ZEND_ACC_TRAIT) || ce->generic_parameters) {
 			preload_register_trait_methods(ce);
 		}
 	} ZEND_HASH_FOREACH_END();
 
 	ZEND_HASH_MAP_FOREACH_PTR(preload_scripts, tmp_script) {
 		ZEND_HASH_MAP_FOREACH_PTR(&tmp_script->script.class_table, ce) {
-			if (ce->ce_flags & ZEND_ACC_TRAIT) {
+			if ((ce->ce_flags & ZEND_ACC_TRAIT) || ce->generic_parameters) {
 				preload_register_trait_methods(ce);
 			}
 		} ZEND_HASH_FOREACH_END();
