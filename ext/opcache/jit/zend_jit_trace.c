@@ -7236,9 +7236,19 @@ done:
 					}
 				}
 				if (p->info & ZEND_JIT_TRACE_FAKE_INIT_CALL) {
-					int skip_guard = 0;
+					/* p->func may be NULL: the recorder withholds it for a
+					 * call it couldn't prove would still run the same
+					 * function by DO_FCALL time (see the comment above on
+					 * resolved_op_array) -- e.g. a dynamic callee (closure
+					 * value, callable string, dynamic method name) reached
+					 * via a turbofish call. zend_jit_init_fcall_guard()
+					 * unconditionally dereferences func->type, so an unknown
+					 * func here must skip guard emission entirely rather
+					 * than attempt to identify a callee that was never
+					 * resolved. */
+					int skip_guard = !p->func;
 
-					if (init_opline) {
+					if (!skip_guard && init_opline) {
 						zend_call_info *call_info = jit_extension->func_info.callee_info;
 
 						while (call_info) {

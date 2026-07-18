@@ -3325,8 +3325,40 @@ static bool zend_jit_op_array_is_generic_shared(const zend_op_array *op_array);
  * generics and their monomorphs interpreted. */
 static bool zend_jit_op_array_is_generic_shared(const zend_op_array *op_array)
 {
-	if (op_array->fn_flags2 & (ZEND_ACC2_MONOMORPH_TYPE_ARGS | ZEND_ACC2_GENERIC_ARGINFO_CLONE)) {
+	if (op_array->fn_flags2 & ZEND_ACC2_MONOMORPH_TYPE_ARGS) {
 		return true;
+	}
+	if (op_array->fn_flags2 & ZEND_ACC2_GENERIC_ARGINFO_CLONE) {
+		/* A substituted class-method clone (e.g. Collection<User>::add(T
+		 * $item) -> add(User $item)) normally shares the template's opcode
+		 * buffer with every OTHER monomorph's own differently-substituted
+		 * clone -- compiling it would bake one binding's checks into code
+		 * every sibling reuses. zend_maybe_substitute_inherited_method
+		 * (zend_inheritance.c) gives this clone its own detached opcode
+		 * buffer (ZEND_ACC2_JIT_MONO_SETUP marks that this ran), which
+		 * removes THAT hazard -- but ZEND_ACC2_JIT_MONO_SETUP alone is set
+		 * unconditionally, BEFORE the clone even attempts SHM persistence,
+		 * so it doesn't by itself prove the detached (arena-allocated, thus
+		 * request-lifetime) opcodes ever made it into SHM. Compiling an
+		 * unpersisted clone would let process-global JIT state (hot-trace
+		 * counters, compiled native code) reference addresses that die with
+		 * the request arena -- exactly the multi-request crash class this
+		 * project already hit and fixed once for function monomorphs (see
+		 * the SHM-persistence memory notes). ZEND_ACC_IMMUTABLE is only set
+		 * on the class-table slot's op_arrays once zend_monomorph_cache_add
+		 * actually succeeds (zend_inheritance.c swaps the slot to the
+		 * persisted copy on success), so requiring BOTH flags together is
+		 * the same "detached AND proven SHM-resident" invariant the
+		 * existing function-monomorph runtime-setup path already relies on.
+		 * Confirmed empirically: without persistence (no opcache.preload),
+		 * ZEND_ACC2_JIT_MONO_SETUP is set but ZEND_ACC_IMMUTABLE never is,
+		 * for the entire life of the process -- this op_array correctly
+		 * stays excluded. Under opcache.preload (base already immutable
+		 * before the first request), both flags land together and a hot
+		 * caller's trace can inline straight through the call -- confirmed
+		 * by profiling Collection<User>::add() in a hot foreach loop. */
+		return !((op_array->fn_flags2 & ZEND_ACC2_JIT_MONO_SETUP)
+			&& (op_array->fn_flags & ZEND_ACC_IMMUTABLE));
 	}
 	if (op_array->generic_parameters) {
 		/* A generic FUNCTION (or method carrying its OWN <T>, not just its
@@ -3364,20 +3396,37 @@ static bool zend_jit_op_array_is_generic_shared(const zend_op_array *op_array)
 	 * SOMETHING about it is T-dependent: either its own signature (checked
 	 * precisely by zend_substitute_trait_method_arg_info via ->parameters/
 	 * ->return_type -- same shared-buffer / per-binding-arg_info hazard the
-	 * ARGINFO_CLONE check above guards against), or -- the case that bit us
-	 * empirically -- a turbofish call site inside its body caches a
-	 * ->turbofish_args table there too, and JIT-compiling THAT op_array (even
-	 * though ITS OWN signature is T-free) exposed a real, pre-existing bug in
-	 * the JIT's closure call-frame teardown for a T-capturing closure invoked
-	 * from newly-JIT-eligible code (2 leak-only failures under function-mode
-	 * JIT, tracked separately -- see php-generics-jit-monomorphs memory).
-	 * Rather than characterize every way generic_types can matter, exclude
-	 * on ANY population of it, matching this function's ORIGINAL blanket
-	 * `|| op_array->generic_types` clause exactly -- the actual goal here
-	 * (T-free shared class methods with no turbofish anywhere in their body,
-	 * e.g. doctrine's ArrayCollection::map()) never allocates generic_types
-	 * at all, so it's unaffected either way. */
-	if (op_array->generic_types) {
+	 * ARGINFO_CLONE check above guards against), or a turbofish call site
+	 * inside its body caching a ->turbofish_args table there too.
+	 *
+	 * Reaching this point already means op_array has neither its own
+	 * generic_parameters nor (via the ARGINFO_CLONE check above) a
+	 * per-monomorph substituted arg_info -- so if generic_types is
+	 * populated at all here, it can ONLY be because ->parameters or
+	 * ->return_type reference an ENCLOSING scope's T (a method whose own
+	 * signature uses class-level T, still genuinely T-dependent) or because
+	 * ->turbofish_args was cached for a turbofish call site somewhere in
+	 * its body. For the turbofish-only case (own parameters/return_type
+	 * empty), tracing JIT is safe to compile it: confirmed by profiling
+	 * that a caller (e.g. top-level script code) with a `new Box::<T>()`
+	 * turbofish call in its body was unconditionally excluded even though
+	 * NOTHING about the caller itself is generic -- blocking a hot loop
+	 * around such a call from ever being traced/inlined at all.
+	 *
+	 * BUT this must stay scoped to ZEND_JIT_ON_HOT_TRACE specifically:
+	 * enabling the SAME op_arrays for function-mode JIT (ZEND_JIT_ON_
+	 * HOT_COUNTERS / ON_SCRIPT_LOAD) produced a real, empirically confirmed
+	 * closure-object leak (368B == sizeof(zend_closure), allocated at
+	 * zend_closure_new) on turbofish-over-dynamic-callee scripts (closure
+	 * value / callable string / method call combined) -- a function-mode-
+	 * JIT-specific interaction never exercised before this op_array class
+	 * became JIT-eligible there, root cause not yet isolated. Tracing JIT
+	 * on the identical test suite is 518/518 clean (full battery, 2026-07-
+	 * 18), so only ON_HOT_TRACE is allowed through this carve-out until the
+	 * function-mode path gets the same scrutiny. */
+	if (op_array->generic_types
+			&& (op_array->generic_types->parameters || op_array->generic_types->return_type
+				|| JIT_G(trigger) != ZEND_JIT_ON_HOT_TRACE)) {
 		return true;
 	}
 	/* Closures can resolve an outer T (from the frame that created them) via a
