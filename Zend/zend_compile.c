@@ -1352,6 +1352,150 @@ static zend_always_inline bool zend_verify_one_generic_param(
 	return true;
 }
 
+/* True when `t` contains a "self"/"static"/"parent" placeholder name
+ * anywhere inside it (as a plain NAME leaf or as a NAMED_WITH_ARGS
+ * composite's own name, e.g. `self<T>`). These need scope-relative keyword
+ * resolution (relative to the executing class, not a simple string lookup or
+ * a T-substitution pass) that belongs to the variance/covariant-return
+ * machinery, not to generic T-ref substitution. zend_substitute_leaf_type_
+ * param would substitute the T *inside* such a type but leave the outer
+ * "self"/"static"/"parent" name untouched, producing an unresolvable
+ * literal class name like "self<int>" and rejecting a correct value. Every
+ * NAMED_WITH_ARGS-composite substitution site (arg_info at monomorph
+ * synthesis, and the runtime-check helpers below) must bail out on such a
+ * type and leave it to whatever already resolves self/static/parent
+ * correctly for covariant returns. */
+ZEND_API bool zend_type_contains_self_static_parent(zend_type t)
+{
+	if (ZEND_TYPE_HAS_NAME(t)) {
+		zend_string *name = ZEND_TYPE_NAME(t);
+		return zend_string_equals_ci(name, ZSTR_KNOWN(ZEND_STR_SELF))
+			|| zend_string_equals_ci(name, ZSTR_KNOWN(ZEND_STR_STATIC))
+			|| zend_string_equals_ci(name, ZSTR_KNOWN(ZEND_STR_PARENT));
+	}
+	if (ZEND_TYPE_HAS_NAMED_WITH_ARGS(t)) {
+		const zend_type_named_with_args *nwa = ZEND_TYPE_NAMED_WITH_ARGS(t);
+		if (nwa->name
+				&& (zend_string_equals_ci(nwa->name, ZSTR_KNOWN(ZEND_STR_SELF))
+					|| zend_string_equals_ci(nwa->name, ZSTR_KNOWN(ZEND_STR_STATIC))
+					|| zend_string_equals_ci(nwa->name, ZSTR_KNOWN(ZEND_STR_PARENT)))) {
+			return true;
+		}
+		for (uint32_t i = 0; i < nwa->count; i++) {
+			if (zend_type_contains_self_static_parent(nwa->args[i])) return true;
+		}
+		return false;
+	}
+	if (ZEND_TYPE_HAS_LIST(t)) {
+		const zend_type *member;
+		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(t), member) {
+			if (zend_type_contains_self_static_parent(*member)) return true;
+		} ZEND_TYPE_LIST_FOREACH_END();
+	}
+	return false;
+}
+
+/* Build a request-local args array (indexed by FUNCTION_LIKE type-parameter
+ * index) from either the turbofish args_box (nwa) or the frame's captured
+ * type-arg table, mirroring the two binding sources zend_verify_one_generic_
+ * param already reads. Returns the arity, or 0 if no binding is available
+ * (caller must then skip composite verification). `out` must have room for
+ * ZEND_GENERIC_MAX_PARAMS entries. */
+static uint32_t zend_collect_generic_call_args(
+		zend_execute_data *call, const zend_type_named_with_args *nwa, zend_type *out)
+{
+	if (nwa) {
+		uint32_t n = nwa->count;
+		if (n > ZEND_GENERIC_MAX_PARAMS) n = ZEND_GENERIC_MAX_PARAMS;
+		for (uint32_t i = 0; i < n; i++) {
+			out[i] = nwa->args[i];
+		}
+		return n;
+	}
+	if (call->type_args) {
+		uint32_t n = call->type_args->count;
+		if (n > ZEND_GENERIC_MAX_PARAMS) n = ZEND_GENERIC_MAX_PARAMS;
+		for (uint32_t i = 0; i < n; i++) {
+			const zend_type *resolved = zend_type_arg_entry_type(&call->type_args->entries[i]);
+			out[i] = resolved ? *resolved : (zend_type) ZEND_TYPE_INIT_NONE(0);
+		}
+		return n;
+	}
+	return 0;
+}
+
+/* Composite counterpart to zend_verify_one_generic_param: verify a single
+ * value parameter whose pre-erasure type is a `Box<T>`-style NAMED_WITH_ARGS
+ * composite containing a FUNCTION_LIKE T-ref somewhere inside it (not a bare
+ * top-level T-ref, which zend_verify_one_generic_param already handles).
+ * Substitutes the whole composite type against the call's bindings, then
+ * value-checks it the same way zend_check_pre_erasure_type_value's NWA
+ * branch already checks a fully concrete composite type. If the binding
+ * can't fully ground the type (an unresolved ref remains — e.g. it turns
+ * out to reference a class-scope T this pass doesn't cover), the check is
+ * skipped rather than guessed at, matching the bare-T fallback's own
+ * tolerance for unresolvable refs. Takes an explicit owned copy of the
+ * substitution result via zend_type_copy_ctor before using it: the
+ * underlying zend_substitute_leaf_type_param_origin has documented,
+ * unpredictable borrowed-vs-owned return ownership (see the known-gaps
+ * note this mirrors), so this function never assumes either and instead
+ * always makes its own independently-owned, independently-released copy —
+ * the original substitution result itself is never released, matching the
+ * established (arg_info-substitution) precedent for the same hazard. */
+static bool zend_verify_one_generic_composite_param(
+		zend_execute_data *call, const zend_function *fbc,
+		const zend_type *pre_erasure, const zend_type *args, uint32_t arity,
+		uint32_t arg_idx, uint32_t num_args, bool strict)
+{
+	/* The caller has already proven (zend_type_fully_groundable) that this
+	 * substitution fully grounds -- a composite rebuild, which the known
+	 * ownership rule for zend_substitute_leaf_type_param_origin documents
+	 * as OWNED (unlike a bare-T passthrough, which can be borrowed). `sub`
+	 * is therefore ours to release directly; no extra copy_ctor needed. */
+	zend_type sub = zend_substitute_function_type_param(*pre_erasure, args, arity);
+	ZEND_ASSERT(!zend_type_contains_type_parameter(sub));
+
+	bool is_variadic_slot = (fbc->common.fn_flags & ZEND_ACC_VARIADIC)
+		&& arg_idx == fbc->common.num_args;
+	uint32_t sweep_end = is_variadic_slot ? num_args : arg_idx + 1;
+
+	bool ok = true;
+	for (uint32_t aidx = arg_idx; aidx < sweep_end; aidx++) {
+		zval *arg = ZEND_CALL_ARG(call, aidx + 1);
+		zval *target = arg;
+		const zend_reference *zref = NULL;
+		if (Z_ISREF_P(target)) {
+			zref = Z_REF_P(target);
+			target = Z_REFVAL_P(target);
+		}
+		if (!zend_check_pre_erasure_type_value(&sub, target, zref, strict)) {
+			zend_string *expected = zend_type_to_string(sub);
+			const zend_arg_info *ai;
+			if (is_variadic_slot) {
+				ai = &fbc->common.arg_info[fbc->common.num_args];
+			} else {
+				ai = (aidx < fbc->common.num_args)
+					? &fbc->common.arg_info[aidx] : NULL;
+			}
+			zend_throw_error(zend_ce_type_error,
+				"%s%s%s(): Argument #%u%s%s%s must be of type %s, %s given",
+				fbc->common.scope ? ZSTR_VAL(fbc->common.scope->name) : "",
+				fbc->common.scope ? "::" : "",
+				fbc->common.function_name ? ZSTR_VAL(fbc->common.function_name) : "{closure}",
+				aidx + 1,
+				(ai && ai->name) ? " ($" : "",
+				(ai && ai->name) ? ZSTR_VAL(ai->name) : "",
+				(ai && ai->name) ? ")" : "",
+				ZSTR_VAL(expected), zend_zval_value_name(target));
+			zend_string_release(expected);
+			ok = false;
+			break;
+		}
+	}
+	zend_type_release(sub, /* persistent */ false);
+	return ok;
+}
+
 /* Count the direct FUNCTION_LIKE T-ref value parameters; the persister and the
  * runtime builder share it so both size the plan identically. */
 ZEND_API uint32_t zend_count_generic_value_checks(const HashTable *parameters)
@@ -1440,34 +1584,70 @@ ZEND_API bool zend_verify_generic_arg_types(zend_execute_data *call, const zend_
 				return false;
 			}
 		}
-		return true;
+	} else {
+		/* Fallback for opcache-persisted tables (read-only SHM, no plan cached):
+		 * iterate the parameters hash directly. */
+		const HashTable *pre = gt->parameters;
+		zend_ulong arg_idx;
+		zend_type *pe_type_ptr;
+		ZEND_HASH_FOREACH_NUM_KEY_PTR(pre, arg_idx, pe_type_ptr) {
+			if (arg_idx >= num_args) continue;
+			if (!ZEND_TYPE_HAS_TYPE_PARAMETER(*pe_type_ptr)) continue;
+			const zend_type_parameter_ref *ref = ZEND_TYPE_TYPE_PARAMETER(*pe_type_ptr);
+			if (ref->origin != ZEND_GENERIC_ORIGIN_FUNCTION_LIKE) continue;
+			if (!zend_verify_one_generic_param(call, fbc, nwa,
+					(uint32_t) arg_idx, ref->index, num_args, strict)) {
+				return false;
+			}
+		} ZEND_HASH_FOREACH_END();
 	}
 
-	/* Fallback for opcache-persisted tables (read-only SHM, no plan cached):
-	 * iterate the parameters hash directly. */
-	const HashTable *pre = gt->parameters;
-	zend_ulong arg_idx;
-	zend_type *pe_type_ptr;
-	ZEND_HASH_FOREACH_NUM_KEY_PTR(pre, arg_idx, pe_type_ptr) {
-		if (arg_idx >= num_args) continue;
-		if (!ZEND_TYPE_HAS_TYPE_PARAMETER(*pe_type_ptr)) continue;
-		const zend_type_parameter_ref *ref = ZEND_TYPE_TYPE_PARAMETER(*pe_type_ptr);
-		if (ref->origin != ZEND_GENERIC_ORIGIN_FUNCTION_LIKE) continue;
-		if (!zend_verify_one_generic_param(call, fbc, nwa,
-				(uint32_t) arg_idx, ref->index, num_args, strict)) {
-			return false;
-		}
-	} ZEND_HASH_FOREACH_END();
+	/* Composite (`Box<T>`-style NAMED_WITH_ARGS) value parameters: not part of
+	 * either pass above (both only match a bare top-level T-ref). Collected
+	 * separately since they need the full args array, not a single tp_index. */
+	{
+		const HashTable *pre = gt->parameters;
+		zend_ulong arg_idx;
+		zend_type *pe_type_ptr;
+		zend_type call_args[ZEND_GENERIC_MAX_PARAMS];
+		uint32_t call_arity = 0;
+		bool call_args_built = false;
+		ZEND_HASH_FOREACH_NUM_KEY_PTR(pre, arg_idx, pe_type_ptr) {
+			if (arg_idx >= num_args) continue;
+			if (ZEND_TYPE_HAS_TYPE_PARAMETER(*pe_type_ptr)) continue; /* bare -- handled above */
+			if (!zend_type_contains_type_parameter(*pe_type_ptr)) continue;
+			if (!zend_type_contains_named_with_args(*pe_type_ptr)) continue;
+			if (zend_type_contains_self_static_parent(*pe_type_ptr)) continue;
+			if (!call_args_built) {
+				call_arity = zend_collect_generic_call_args(call, nwa, call_args);
+				call_args_built = true;
+			}
+			if (call_arity == 0) continue;
+			/* Must be proven fully-groundable BEFORE substituting -- see the
+			 * precheck note on zend_type_fully_groundable: substituting an
+			 * unresolvable composite would allocate and then leak partial
+			 * work when the result is discarded. */
+			if (!zend_type_fully_groundable(*pe_type_ptr, ZEND_GENERIC_ORIGIN_FUNCTION_LIKE, call_arity)) continue;
+			if (!zend_verify_one_generic_composite_param(call, fbc,
+					pe_type_ptr, call_args, call_arity,
+					(uint32_t) arg_idx, num_args, strict)) {
+				return false;
+			}
+		} ZEND_HASH_FOREACH_END();
+	}
 	return true;
 }
 
 /* Reified counterpart to zend_verify_return_error's erased check. Consults
  * op_array->generic_types->return_type (pre-erasure) and, if it's a direct
- * T-ref, substitutes via call->type_args and verifies the value. Only bare
- * T at the top level is handled; composite shapes (array<T>, Box<T>) still
- * fall through to the existing erased-bound check. Returns true when no
- * reified check applies *or* the check passes; false (with EG(exception)
- * set) when the value violates the reified type. */
+ * T-ref, substitutes via call->type_args and verifies the value. A `Box<T>`-
+ * style NAMED_WITH_ARGS composite return type is substituted as a whole
+ * (proven fully-groundable first via zend_type_fully_groundable, then
+ * released directly as an owned composite rebuild -- see
+ * zend_verify_one_generic_composite_param for the same pattern) rather than
+ * only handling a bare top-level T-ref. Returns true when no reified check
+ * applies *or* the check passes; false (with EG(exception) set) when the
+ * value violates the reified type. */
 ZEND_API bool zend_verify_generic_return_type(zend_execute_data *call, zval *retval_ptr)
 {
 	if (!call->type_args) {
@@ -1480,34 +1660,65 @@ ZEND_API bool zend_verify_generic_return_type(zend_execute_data *call, zval *ret
 		return true;
 	}
 	const zend_type *pe_type = fbc->op_array.generic_types->return_type;
-	if (!ZEND_TYPE_HAS_TYPE_PARAMETER(*pe_type)) {
+	if (!zend_type_contains_type_parameter(*pe_type)) {
 		return true;
 	}
-	const zend_type_parameter_ref *param_ref = ZEND_TYPE_TYPE_PARAMETER(*pe_type);
-	if (param_ref->origin != ZEND_GENERIC_ORIGIN_FUNCTION_LIKE) {
+
+	zend_type substituted;
+	zend_type owned = (zend_type) ZEND_TYPE_INIT_NONE(0);
+	bool release_owned = false;
+	if (ZEND_TYPE_HAS_TYPE_PARAMETER(*pe_type)) {
+		/* Bare top-level T-ref: resolve the leaf directly, as before. */
+		const zend_type_parameter_ref *param_ref = ZEND_TYPE_TYPE_PARAMETER(*pe_type);
+		if (param_ref->origin != ZEND_GENERIC_ORIGIN_FUNCTION_LIKE) {
+			return true;
+		}
+		if (param_ref->index >= call->type_args->count) {
+			return true;
+		}
+		const zend_type *resolved = zend_type_arg_entry_type(
+			&call->type_args->entries[param_ref->index]);
+		if (!resolved || !ZEND_TYPE_IS_SET(*resolved)) {
+			return true;
+		}
+		substituted = *resolved;
+		/* `?T` carries the nullable bit on the outer T-ref; preserve it on
+		 * the substituted type so a returned NULL still passes when
+		 * declared `?T`. */
+		if (ZEND_TYPE_FULL_MASK(*pe_type) & _ZEND_TYPE_NULLABLE_BIT) {
+			ZEND_TYPE_FULL_MASK(substituted) |= _ZEND_TYPE_NULLABLE_BIT;
+		}
+	} else if (zend_type_contains_named_with_args(*pe_type) && !zend_type_contains_self_static_parent(*pe_type)) {
+		zend_type call_args[ZEND_GENERIC_MAX_PARAMS];
+		uint32_t arity = zend_collect_generic_call_args(call, NULL, call_args);
+		/* Must be proven fully-groundable BEFORE substituting -- see the
+		 * precheck note on zend_type_fully_groundable: substituting an
+		 * unresolvable composite would allocate and then leak partial work
+		 * when the result is discarded. */
+		if (arity == 0 || !zend_type_fully_groundable(*pe_type, ZEND_GENERIC_ORIGIN_FUNCTION_LIKE, arity)) {
+			return true;
+		}
+		/* The precheck above guarantees full grounding -- a composite
+		 * rebuild, documented OWNED by the known ownership rule for
+		 * zend_substitute_leaf_type_param_origin. `sub` is ours to release
+		 * directly. */
+		zend_type sub = zend_substitute_function_type_param(*pe_type, call_args, arity);
+		ZEND_ASSERT(!zend_type_contains_type_parameter(sub));
+		owned = sub;
+		release_owned = true;
+		substituted = owned;
+	} else {
+		/* A union/intersection member referencing T without an NWA payload
+		 * would already have been folded into a concrete monomorph return
+		 * type by zend_monomorph_build_arg_info; nothing left to check here. */
 		return true;
 	}
-	if (param_ref->index >= call->type_args->count) {
-		return true;
-	}
-	const zend_type *resolved = zend_type_arg_entry_type(
-		&call->type_args->entries[param_ref->index]);
-	if (!resolved || !ZEND_TYPE_IS_SET(*resolved)) {
-		return true;
-	}
-	zend_type substituted = *resolved;
 
 	zval *target = retval_ptr;
 	const zend_reference *zref = NULL;
 	if (Z_ISREF_P(target)) {
 		zref = Z_REF_P(target);
 		target = Z_REFVAL_P(target);
-	}
-
-	/* `?T` carries the nullable bit on the outer T-ref; preserve it on the
-	 * substituted type so a returned NULL still passes when declared `?T`. */
-	if (ZEND_TYPE_FULL_MASK(*pe_type) & _ZEND_TYPE_NULLABLE_BIT) {
-		ZEND_TYPE_FULL_MASK(substituted) |= _ZEND_TYPE_NULLABLE_BIT;
 	}
 
 	bool strict = EG(current_execute_data)
@@ -1523,7 +1734,13 @@ ZEND_API bool zend_verify_generic_return_type(zend_execute_data *call, zval *ret
 			fbc->common.function_name ? ZSTR_VAL(fbc->common.function_name) : "{closure}",
 			ZSTR_VAL(expected), zend_zval_value_name(target));
 		zend_string_release(expected);
+		if (release_owned) {
+			zend_type_release(owned, /* persistent */ false);
+		}
 		return false;
+	}
+	if (release_owned) {
+		zend_type_release(owned, /* persistent */ false);
 	}
 	return true;
 }
@@ -3689,6 +3906,40 @@ ZEND_API bool zend_type_contains_type_parameter(zend_type type)
 		} ZEND_TYPE_LIST_FOREACH_END();
 	}
 	return false;
+}
+
+/* True when every type-parameter ref inside `type` has the given `origin`
+ * and an `index` within `arity` -- i.e. zend_substitute_leaf_type_param_
+ * origin(type, args, arity) is GUARANTEED to fully ground it (no leaf left
+ * as an unresolved type-parameter ref). A pure read-only walk, no
+ * allocation. Callers substituting a composite (NAMED_WITH_ARGS) type must
+ * check this BEFORE calling the substitution function, not after: the
+ * substitution's own recursive walk allocates heap copies for the parts it
+ * DOES resolve even when the overall result doesn't fully ground, and nothing
+ * releases that partial work if the caller discards the result on failure --
+ * a real leak, not a hypothetical one (see the known ownership-hazard note
+ * this guards against). Checking first instead of substituting-then-
+ * discarding avoids ever allocating the doomed partial result. */
+ZEND_API bool zend_type_fully_groundable(
+		zend_type type, zend_generic_origin origin, uint32_t arity)
+{
+	if (ZEND_TYPE_HAS_TYPE_PARAMETER(type)) {
+		const zend_type_parameter_ref *ref = ZEND_TYPE_TYPE_PARAMETER(type);
+		return ref->origin == origin && ref->index < arity;
+	}
+	if (ZEND_TYPE_HAS_NAMED_WITH_ARGS(type)) {
+		const zend_type_named_with_args *nwa = ZEND_TYPE_NAMED_WITH_ARGS(type);
+		for (uint32_t i = 0; i < nwa->count; i++) {
+			if (!zend_type_fully_groundable(nwa->args[i], origin, arity)) return false;
+		}
+	}
+	if (ZEND_TYPE_HAS_LIST(type)) {
+		const zend_type *member;
+		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(type), member) {
+			if (!zend_type_fully_groundable(*member, origin, arity)) return false;
+		} ZEND_TYPE_LIST_FOREACH_END();
+	}
+	return true;
 }
 
 /* Like zend_type_contains_type_parameter, but only counts class-scope refs.

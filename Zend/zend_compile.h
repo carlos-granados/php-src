@@ -1314,6 +1314,9 @@ ZEND_API zend_string *zend_generic_canonical_class_name(
 	zend_string *base_name, const zend_type *args, uint32_t arity);
 ZEND_API bool zend_type_contains_type_parameter(zend_type type);
 ZEND_API bool zend_type_contains_class_scope_type_parameter(zend_type type);
+ZEND_API bool zend_type_contains_named_with_args(zend_type type);
+ZEND_API bool zend_type_contains_self_static_parent(zend_type type);
+ZEND_API bool zend_type_fully_groundable(zend_type type, zend_generic_origin origin, uint32_t arity);
 
 /* class fetches */
 #define ZEND_FETCH_CLASS_DEFAULT	0

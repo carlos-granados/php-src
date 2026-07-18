@@ -889,7 +889,7 @@ static bool zend_get_inheritance_binding(
 
 /* True when `t` carries a NAMED_WITH_ARGS payload (`Box<T>`) anywhere inside it.
  * Building block for zend_type_is_reifiable_leaf_composite below. */
-static bool zend_type_contains_named_with_args(zend_type t)
+ZEND_API bool zend_type_contains_named_with_args(zend_type t)
 {
 	if (ZEND_TYPE_HAS_NAMED_WITH_ARGS(t)) return true;
 	if (ZEND_TYPE_HAS_LIST(t)) {
@@ -961,6 +961,36 @@ static zend_always_inline void zend_union_push_unique(
  *
  * `origin` selects which type-parameter refs to substitute: CLASS_LIKE for the
  * class monomorphizer, FUNCTION_LIKE for the function monomorphizer. */
+/* True when substituting `t` via zend_substitute_leaf_type_param_origin
+ * will allocate a FRESH, owned canonical class-name string rather than
+ * return something borrowed. This mirrors exactly the two branches inside
+ * that function that call zend_generic_canonical_class_name: (1) `t` is
+ * itself a NAMED_WITH_ARGS composite that fully grounds, or (2) `t` is a
+ * bare T-ref of the matching origin whose BINDING (args[ref->index]) is
+ * itself a concrete NAMED_WITH_ARGS type -- the bare-T branch folds that
+ * binding to a fresh canonical name too (see the "fold it to a plain CLASS
+ * reference" comment there). Both cases fold to a PLAIN NAME result, so the
+ * result's own shape can't distinguish them from a genuinely borrowed plain
+ * name -- this must be checked BEFORE substituting, from the pre-erasure
+ * shape and the binding, not the result. Callers must release the result
+ * of zend_substitute_leaf_type_param_origin iff this returns true (see the
+ * known ownership-hazard note on that function: "owned for composite
+ * rebuilds and folded-to-canonical NWA"). */
+static bool zend_leaf_type_param_substitution_allocates(
+		zend_type t, const zend_type *args, uint32_t arity, uint8_t origin)
+{
+	if (ZEND_TYPE_HAS_TYPE_PARAMETER(t)) {
+		const zend_type_parameter_ref *ref = ZEND_TYPE_TYPE_PARAMETER(t);
+		if (ref->origin != origin || ref->index >= arity) {
+			return false;
+		}
+		zend_type bound = args[ref->index];
+		return ZEND_TYPE_HAS_NAMED_WITH_ARGS(bound) && !zend_type_contains_type_parameter(bound);
+	}
+	return ZEND_TYPE_HAS_NAMED_WITH_ARGS(t)
+		&& zend_type_fully_groundable(t, origin, arity);
+}
+
 static zend_type zend_substitute_leaf_type_param_origin(zend_type t, const zend_type *args, uint32_t arity, uint8_t origin)
 {
 	if (ZEND_TYPE_HAS_TYPE_PARAMETER(t)) {
@@ -1008,6 +1038,16 @@ static zend_type zend_substitute_leaf_type_param_origin(zend_type t, const zend_
 		for (uint32_t i = 0; i < src_nwa->count; i++) {
 			zend_type probe = zend_substitute_leaf_type_param_origin(src_nwa->args[i], args, arity, origin);
 			if (memcmp(&probe, &src_nwa->args[i], sizeof(zend_type)) != 0) {
+				/* `probe` is used only for this comparison and then
+				 * discarded -- if the substitution allocated a fresh
+				 * canonical name (see zend_leaf_type_param_substitution_
+				 * allocates), it must be released here or it's orphaned
+				 * with no other reference ever created to it. A probe that
+				 * compares equal allocated nothing (verbatim passthrough),
+				 * so no release is needed on that path. */
+				if (zend_leaf_type_param_substitution_allocates(src_nwa->args[i], args, arity, origin)) {
+					zend_type_release(probe, /* persistent */ false);
+				}
 				needs_rebuild = true;
 				break;
 			}
@@ -1018,8 +1058,21 @@ static zend_type zend_substitute_leaf_type_param_origin(zend_type t, const zend_
 
 		ALLOCA_FLAG(use_heap)
 		zend_type *new_args = (zend_type *) do_alloca(sizeof(zend_type) * src_nwa->count, use_heap);
+		ALLOCA_FLAG(alloc_flags_heap)
+		bool *new_args_allocates = (bool *) do_alloca(sizeof(bool) * src_nwa->count, alloc_flags_heap);
 		bool all_concrete = true;
 		for (uint32_t i = 0; i < src_nwa->count; i++) {
+			/* Determined BEFORE the recursive substitution -- see the doc
+			 * comment on zend_leaf_type_param_substitution_allocates. Each
+			 * element of a nested composite (e.g. the `Box<T>` in
+			 * `Pair<T, Box<T>>`) can independently allocate a fresh
+			 * canonical name; zend_generic_canonical_class_name below only
+			 * READS these entries (via zend_canonical_one) to build the
+			 * OUTER canonical string, it doesn't consume/free them, so any
+			 * freshly-allocated entry must be released explicitly once it's
+			 * been read, or it's orphaned when `new_args` is freed. */
+			new_args_allocates[i] = zend_leaf_type_param_substitution_allocates(
+				src_nwa->args[i], args, arity, origin);
 			new_args[i] = zend_substitute_leaf_type_param_origin(src_nwa->args[i], args, arity, origin);
 			if (zend_type_contains_type_parameter(new_args[i])) {
 				all_concrete = false;
@@ -1033,6 +1086,11 @@ static zend_type zend_substitute_leaf_type_param_origin(zend_type t, const zend_
 			zend_string *canonical = zend_generic_canonical_class_name(
 				src_nwa->name, new_args, src_nwa->count);
 			result = (zend_type) ZEND_TYPE_INIT_CLASS(canonical, 0, 0);
+			for (uint32_t i = 0; i < src_nwa->count; i++) {
+				if (new_args_allocates[i]) {
+					zend_type_release(new_args[i], /* persistent */ false);
+				}
+			}
 		} else {
 			/* Partial substitution — keep as NWA with substituted args. */
 			size_t size = ZEND_TYPE_NAMED_WITH_ARGS_SIZE(src_nwa->count);
@@ -1041,8 +1099,15 @@ static zend_type zend_substitute_leaf_type_param_origin(zend_type t, const zend_
 			new_nwa->name_attr = src_nwa->name_attr;
 			new_nwa->count = src_nwa->count;
 			for (uint32_t i = 0; i < src_nwa->count; i++) {
+				zend_type new_args_i_orig = new_args[i];
 				new_nwa->args[i] = new_args[i];
 				zend_type_copy_ctor(&new_nwa->args[i], /* use_arena */ true, /* persistent */ false);
+				/* Same orphaning as the all_concrete branch above: copy_ctor
+				 * built an independent arena copy rather than adopting
+				 * new_args[i]'s own storage. */
+				if (new_args_allocates[i]) {
+					zend_type_release(new_args_i_orig, /* persistent */ false);
+				}
 			}
 			ZEND_TYPE_SET_PTR(result, new_nwa);
 			ZEND_TYPE_FULL_MASK(result) = ZEND_TYPE_FULL_MASK(t);
@@ -1051,6 +1116,7 @@ static zend_type zend_substitute_leaf_type_param_origin(zend_type t, const zend_
 		if (ZEND_TYPE_FULL_MASK(t) & _ZEND_TYPE_NULLABLE_BIT) {
 			ZEND_TYPE_FULL_MASK(result) |= _ZEND_TYPE_NULLABLE_BIT;
 		}
+		free_alloca(new_args_allocates, alloc_flags_heap);
 		free_alloca(new_args, use_heap);
 		return result;
 	}
@@ -4082,10 +4148,31 @@ static void zend_substitute_trait_method_arg_info(
 
 	if (has_return && orig_op->generic_types->return_type) {
 		const zend_type *pre = orig_op->generic_types->return_type;
-		if (ZEND_TYPE_HAS_TYPE_PARAMETER(*pre)) {
+		/* Bare T (ZEND_TYPE_HAS_TYPE_PARAMETER) or a Box<T>-style NAMED_WITH_ARGS
+		 * composite: substitute here. A plain union/intersection of leaves
+		 * (T|Foo, with no NWA) is deliberately left alone -- it already
+		 * reifies correctly via the property-assignment check path, and
+		 * additionally substituting it here is redundant work, not a gap.
+		 * The NWA case must be proven fully-groundable BEFORE substituting
+		 * (unlike the bare case, which always grounds by construction): the
+		 * substitution's own recursive walk allocates heap copies for every
+		 * leaf it resolves even when the overall result doesn't fully
+		 * ground, and nothing here would release a discarded partial
+		 * result. */
+		bool is_bare = ZEND_TYPE_HAS_TYPE_PARAMETER(*pre);
+		bool is_nwa = !is_bare && zend_type_contains_named_with_args(*pre)
+			&& !zend_type_contains_self_static_parent(*pre)
+			&& zend_type_fully_groundable(*pre, ZEND_GENERIC_ORIGIN_CLASS_LIKE, bind_arity);
+		if (is_bare || is_nwa) {
+			/* Determined BEFORE substituting, from the pre-erasure shape and
+			 * (for the bare case) the binding -- see the doc comment on
+			 * zend_leaf_type_param_substitution_allocates for why the
+			 * RESULT's own shape can't be used to decide this. */
+			bool allocates = zend_leaf_type_param_substitution_allocates(
+				*pre, bind_args, bind_arity, ZEND_GENERIC_ORIGIN_CLASS_LIKE);
 			zend_type sub = zend_substitute_leaf_type_param(*pre, bind_args, bind_arity);
 			sub = zend_erase_using_class_t_ref(sub, using_ce);
-			if (!ZEND_TYPE_HAS_TYPE_PARAMETER(sub)) {
+			if (!zend_type_contains_type_parameter(sub)) {
 				if (!new_block) {
 					new_block = zend_clone_arg_info_block(orig_block, total);
 				}
@@ -4099,6 +4186,15 @@ static void zend_substitute_trait_method_arg_info(
 				new_block[0].type = sub;
 				ZEND_TYPE_FULL_MASK(new_block[0].type) |= carry;
 				zend_type_copy_ctor(&new_block[0].type, /* use_arena */ true, /* persistent */ false);
+				/* zend_type_copy_ctor builds a wholly independent copy of
+				 * whatever `sub` points to (addref'ing shared leaf name
+				 * strings, but allocating its OWN struct containers) rather
+				 * than adopting `sub`'s own storage -- so a freshly
+				 * allocated `sub` (allocates == true) is now orphaned and
+				 * must be released here. A borrowed `sub` must never be. */
+				if (allocates) {
+					zend_type_release(sub, /* persistent */ false);
+				}
 			}
 		}
 	}
@@ -4112,13 +4208,19 @@ static void zend_substitute_trait_method_arg_info(
 			}
 
 			zend_type *pre_erasure = (zend_type *) Z_PTR_P(zv);
-			if (!ZEND_TYPE_HAS_TYPE_PARAMETER(*pre_erasure)) {
+			bool p_is_bare = ZEND_TYPE_HAS_TYPE_PARAMETER(*pre_erasure);
+			bool p_is_nwa = !p_is_bare && zend_type_contains_named_with_args(*pre_erasure)
+				&& !zend_type_contains_self_static_parent(*pre_erasure)
+				&& zend_type_fully_groundable(*pre_erasure, ZEND_GENERIC_ORIGIN_CLASS_LIKE, bind_arity);
+			if (!p_is_bare && !p_is_nwa) {
 				continue;
 			}
 
+			bool p_allocates = zend_leaf_type_param_substitution_allocates(
+				*pre_erasure, bind_args, bind_arity, ZEND_GENERIC_ORIGIN_CLASS_LIKE);
 			zend_type sub = zend_substitute_leaf_type_param(*pre_erasure, bind_args, bind_arity);
 			sub = zend_erase_using_class_t_ref(sub, using_ce);
-			if (ZEND_TYPE_HAS_TYPE_PARAMETER(sub)) {
+			if (zend_type_contains_type_parameter(sub)) {
 				continue;
 			}
 
@@ -4132,6 +4234,10 @@ static void zend_substitute_trait_method_arg_info(
 			new_block[return_slot_offset + idx].type = sub;
 			ZEND_TYPE_FULL_MASK(new_block[return_slot_offset + idx].type) |= carry;
 			zend_type_copy_ctor(&new_block[return_slot_offset + idx].type, /* use_arena */ true, /* persistent */ false);
+			/* See the matching comment on the return-type case above. */
+			if (p_allocates) {
+				zend_type_release(sub, /* persistent */ false);
+			}
 		} ZEND_HASH_FOREACH_END();
 	}
 
@@ -8052,31 +8158,66 @@ static zend_arg_info *zend_monomorph_build_arg_info(
 			pre = zv ? (const zend_type *) Z_PTR_P(zv) : NULL;
 		}
 
-		/* Specialize a BARE FUNCTION_LIKE type-parameter leaf (`T $x`), and also a
-		 * union/intersection of leaves (`T|Other`, `A|B`): substitute the function
-		 * T-refs and, when every member is then ground, install the concrete type so
-		 * RECV/return checks enforce it. A composite carrying a `Box<T>`-style
-		 * NAMED_WITH_ARGS stays erased — the erased model represents generic instances
-		 * by their plain class, so folding to a monomorph name would make RECV reject
-		 * the plain instances the body emits. */
+		/* Specialize a BARE FUNCTION_LIKE type-parameter leaf (`T $x`), a
+		 * union/intersection of leaves (`T|Other`, `A|B`), and a `Box<T>`-style
+		 * NAMED_WITH_ARGS composite: substitute the function T-refs and, when
+		 * every member is then ground, install the concrete type (a real,
+		 * synthesized monomorph name for the NAMED_WITH_ARGS case) so RECV/
+		 * return checks enforce it via the ordinary, already-fast typed-param
+		 * machinery. Reified generics require an explicit turbofish at every
+		 * generic instantiation (no naked `new Collection()` for a generic
+		 * class), so a function body cannot legitimately produce an
+		 * un-monomorphized "plain instance" of a generic class here — folding
+		 * to the monomorph name is safe. */
 		bool is_bare_leaf = pre && ZEND_TYPE_IS_SET(*pre)
 			&& ZEND_TYPE_HAS_TYPE_PARAMETER(*pre)
 			&& ZEND_TYPE_TYPE_PARAMETER(*pre)->origin == ZEND_GENERIC_ORIGIN_FUNCTION_LIKE;
 		bool is_leaf_union = !is_bare_leaf && pre && ZEND_TYPE_IS_SET(*pre)
 			&& zend_type_is_reifiable_leaf_composite(*pre);
-		zend_type sub;
-		bool substitute = is_bare_leaf || is_leaf_union;
-		if (substitute) {
-			sub = zend_substitute_function_type_param(*pre, args, arity);
-			/* A composite that didn't fully ground (an unbound T remains) keeps
-			 * the erased arg_info; a bare leaf always grounds here. */
-			if (is_leaf_union && zend_type_contains_type_parameter(sub)) {
-				substitute = false;
+		bool is_named_with_args = !is_bare_leaf && !is_leaf_union && pre && ZEND_TYPE_IS_SET(*pre)
+			&& zend_type_contains_type_parameter(*pre)
+			&& zend_type_contains_named_with_args(*pre)
+			&& !zend_type_contains_self_static_parent(*pre);
+		/* A composite (union or NAMED_WITH_ARGS) must be proven to fully
+		 * ground BEFORE substituting, not after: zend_substitute_function_
+		 * type_param's own recursive walk allocates heap copies for every
+		 * leaf it resolves, even the ones belonging to a result that turns
+		 * out not to fully ground overall -- discarding such a result
+		 * without releasing it would leak that partial work. A bare leaf
+		 * always grounds by construction (index checked above). */
+		if (is_leaf_union || is_named_with_args) {
+			if (!zend_type_fully_groundable(*pre, ZEND_GENERIC_ORIGIN_FUNCTION_LIKE, arity)) {
+				is_leaf_union = false;
+				is_named_with_args = false;
 			}
 		}
+		zend_type sub;
+		bool substitute = is_bare_leaf || is_leaf_union || is_named_with_args;
+		/* Determined BEFORE substituting -- see the doc comment on
+		 * zend_leaf_type_param_substitution_allocates for why the RESULT's
+		 * own shape can't be used to decide this. is_leaf_union's `sub`
+		 * (a plain T|Other union, never NWA) doesn't go through either of
+		 * that helper's allocating branches, so it's correctly excluded
+		 * (false) without special-casing it here. */
+		bool allocates = substitute
+			&& zend_leaf_type_param_substitution_allocates(*pre, args, arity, ZEND_GENERIC_ORIGIN_FUNCTION_LIKE);
 		if (substitute) {
+			sub = zend_substitute_function_type_param(*pre, args, arity);
+		}
+		if (substitute) {
+			/* zend_type_copy_ctor mutates `sub` IN PLACE for a composite
+			 * (NAMED_WITH_ARGS/LIST) type -- it builds a wholly independent
+			 * arena copy and repoints `sub` at it, so the ORIGINAL structure
+			 * `sub` pointed to becomes unreachable through `sub` itself the
+			 * instant copy_ctor returns. Save that original pointer value
+			 * first so it can be released afterward if it was freshly
+			 * allocated (a borrowed `sub` must never be released). */
+			zend_type sub_orig = sub;
 			zend_type_copy_ctor(&sub, /* use_arena */ true, /* persistent */ false);
 			new_block[slot].type = sub;
+			if (allocates) {
+				zend_type_release(sub_orig, /* persistent */ false);
+			}
 		} else {
 			zend_type_copy_ctor(&new_block[slot].type, /* use_arena */ true, /* persistent */ false);
 		}
