@@ -3307,6 +3307,8 @@ static int zend_jit_setup_hot_counters(zend_op_array *op_array)
 	return SUCCESS;
 }
 
+static bool zend_jit_op_array_is_generic_shared(const zend_op_array *op_array);
+
 #include "jit/zend_jit_trace.c"
 
 /* Reified-generic monomorphs are shallow copies of their base op_array that
@@ -3323,9 +3325,40 @@ static int zend_jit_setup_hot_counters(zend_op_array *op_array)
  * generics and their monomorphs interpreted. */
 static bool zend_jit_op_array_is_generic_shared(const zend_op_array *op_array)
 {
-	if (op_array->generic_parameters
-		|| (op_array->fn_flags2 & (ZEND_ACC2_MONOMORPH_TYPE_ARGS | ZEND_ACC2_GENERIC_ARGINFO_CLONE))) {
+	if (op_array->fn_flags2 & (ZEND_ACC2_MONOMORPH_TYPE_ARGS | ZEND_ACC2_GENERIC_ARGINFO_CLONE)) {
 		return true;
+	}
+	if (op_array->generic_parameters) {
+		/* A generic FUNCTION (or method carrying its OWN <T>, not just its
+		 * scope's) template's bytecode is what actually EXECUTES for every
+		 * DEFAULTED, non-turbofish call site: monomorph synthesis only fires
+		 * for an explicit turbofish or a "promoted concrete" call site (see
+		 * zend_get_or_synthesize_call_monomorph / zend_try_monomorph_resolved_
+		 * call, both gated on a real args_box / CONCRETE-sentinel cache
+		 * state) -- confirmed empirically (debug instrumentation showed
+		 * zend_synthesize_function_monomorph is never entered for psl's
+		 * Vec\map()-style defaulted calls). A plain defaulted call instead
+		 * binds a type-arg table onto the CALL FRAME and runs the TEMPLATE's
+		 * own opcodes directly, unmodified, for every binding -- this is the
+		 * dominant call shape for autoloaded generic functions (psl), so
+		 * blocking the template here left the entire hot path interpreted.
+		 *
+		 * If the template's own arg_info never references a type parameter
+		 * (generic_types == NULL -- the compiler's own signal, see
+		 * zend_monomorph_build_arg_info's `pre_params`/`pre_return`: no table
+		 * means no slot ever substitutes), that direct execution is safe to
+		 * compile: RECV/VERIFY_RETURN_TYPE bake identical checks regardless
+		 * of which concrete T ends up bound on the frame. generic_types ==
+		 * NULL also rules out the turbofish-call-site hazard documented
+		 * below (a body-internal turbofish always allocates generic_types on
+		 * ITS enclosing op_array too), so this single condition guards both
+		 * known hazards for the template case. A monomorph CLONE actually
+		 * synthesized from turbofish/promoted call sites is still handled
+		 * entirely by the SEPARATE, SHM-persistence-gated runtime-JIT path
+		 * (zend_jit_monomorph_runtime_setup) and never reaches this function
+		 * via the compile-time SCRIPT_LOAD/call-graph walk in the first
+		 * place, so this carve-out has no bearing on that mechanism. */
+		return op_array->generic_types != NULL;
 	}
 	/* A pre-erasure type table on THIS op_array (generic_types != NULL) means
 	 * SOMETHING about it is T-dependent: either its own signature (checked

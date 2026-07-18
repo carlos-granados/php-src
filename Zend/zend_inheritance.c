@@ -30,6 +30,8 @@
 #include "zend_attributes.h"
 #include "zend_constants.h"
 #include "zend_observer.h"
+#include "zend_vm.h"
+#include "Optimizer/zend_func_info.h"
 
 ZEND_API zend_class_entry* (*zend_inheritance_cache_get)(zend_class_entry *ce, zend_class_entry *parent, zend_class_entry **traits_and_interfaces) = NULL;
 ZEND_API zend_class_entry* (*zend_inheritance_cache_add)(zend_class_entry *ce, zend_class_entry *proto, zend_class_entry *parent, zend_class_entry **traits_and_interfaces, HashTable *dependencies) = NULL;
@@ -8312,6 +8314,28 @@ ZEND_API zend_function *zend_synthesize_function_monomorph(
 	 * patches) lands in stable shared memory. */
 	if (zend_jit_op_array_runtime_setup) {
 		zend_monomorph_detach_opcodes(mono, &base->op_array);
+
+		/* The struct-level memcpy of base->op_array above blindly copied
+		 * reserved[] (hence ZEND_FUNC_INFO -- any JIT extension/trace-counter
+		 * state already installed on the BASE, e.g. a T-free/argfree
+		 * template op_array that is itself JIT-eligible -- see
+		 * zend_jit_op_array_is_generic_shared) and zend_monomorph_detach_
+		 * opcodes' own opcode memcpy just as blindly copied every opline's
+		 * `handler`, including any hot-trace-counter handler already patched
+		 * into the base's opcodes. Both encode addresses/offsets relative to
+		 * the BASE's own opcode buffer, which is a DIFFERENT allocation from
+		 * this monomorph's freshly detached one -- left uncorrected, the
+		 * monomorph's counters/handlers fire against the wrong buffer and
+		 * jump into garbage compiled code (confirmed by a real crash on an
+		 * argfree turbofish-called generic function, e.g. `add::<int>()`,
+		 * whose template had already been JIT-traced on its own before ever
+		 * being turbofished). Reset both to a clean slate so this monomorph
+		 * builds its own JIT state from scratch, independent of whatever the
+		 * base has accumulated. */
+		ZEND_SET_FUNC_INFO(mono, NULL);
+		for (uint32_t oi = 0; oi < mono->last; oi++) {
+			zend_vm_set_opcode_handler(&mono->opcodes[oi]);
+		}
 	}
 
 	/* Persist into opcache SHM so future requests reuse the monomorph and

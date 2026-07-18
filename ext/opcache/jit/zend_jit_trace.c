@@ -397,7 +397,21 @@ static zend_always_inline void zend_jit_trace_add_op_guard(zend_ssa             
 		if (UNEXPECTED(tssa->vars[ssa_var].alias != NO_ALIAS)) {
 			info->type |= MAY_BE_GUARD;
 		} else {
-			info->type = MAY_BE_GUARD | zend_jit_trace_type_to_info_ex(op_type, info->type);
+			/* info->type == 0 means this SSA var (typically a temporary,
+			 * defined later in the trace than this guard on a value derived
+			 * from it) was never visited by the earlier static analysis --
+			 * NOT that the observed runtime type is provably impossible.
+			 * Reachable for a root trace entering an argfree generic
+			 * function template directly (see
+			 * zend_jit_op_array_is_generic_shared's generic_types==NULL
+			 * carve-out): confirmed via a real assertion failure
+			 * (`info & (1 << type)`) on `function f<T = mixed>($x) { return
+			 * $x * 2; }`, where the temporary holding `$x * 2` hadn't been
+			 * visited yet when the RETURN's guard was emitted. Treat
+			 * "never visited" as "anything possible" (matching
+			 * zend_jit_trace_type_to_info's own -1 default for a fresh
+			 * guard) rather than the untrue "nothing possible". */
+			info->type = MAY_BE_GUARD | zend_jit_trace_type_to_info_ex(op_type, info->type ? info->type : (uint32_t)-1);
 		}
 	}
 }
@@ -464,6 +478,17 @@ static zend_jit_trace_stack_frame* zend_jit_trace_ret_frame(zend_jit_trace_stack
 static void zend_jit_trace_send_type(const zend_op *opline, zend_jit_trace_stack_frame *call, uint8_t type)
 {
 	zend_jit_trace_stack *stack = call->stack;
+	/* call->func can still be unresolved here: SEND opcodes are processed
+	 * before the callee's ENTER record (which is where call->func gets
+	 * corrected -- see the ENTER handler above), and the INIT_CALL record
+	 * itself can carry neither p->func nor p->op_array for a call the
+	 * recorder couldn't statically resolve (e.g. a defaulted call to a
+	 * generic function template dispatched by name). Nothing to type-check
+	 * yet in that case -- the callee's own RECV/VERIFY opcodes will still
+	 * enforce it once entered. */
+	if (!call->func) {
+		return;
+	}
 	const zend_op_array *op_array = &call->func->op_array;
 	uint32_t arg_num = opline->op2.num;
 
@@ -1329,6 +1354,56 @@ static uint32_t find_trampoline_num_args(zend_jit_trace_rec *start, zend_jit_tra
 	return 0;
 }
 
+/* An INIT_CALL record's op_array can be NULL: the recorder deliberately
+ * withholds it for a call it can't PROVE will still be running the same
+ * function by DO_FCALL time (see the "Generic template" comment in
+ * zend_jit_vm_helpers.c) -- e.g. a defaulted, by-name-dispatched call to a
+ * generic function template. Every caller of this INIT_CALL's op_array uses
+ * it to size the callee's abstract-stack frame (zend_jit_trace_frame_size:
+ * num_args-only when op_array is NULL, vs. the real last_var+T once known),
+ * so silently sizing from an unresolved call under-reserves and corrupts
+ * whatever frame gets placed right after it once the real (larger) callee
+ * actually executes. The call's own ENTER record always carries the
+ * resolved op_array by the time it's reached, so recover it by scanning
+ * forward -- but only for the straightforward case with no other pending
+ * (not-yet-entered) call in between, e.g. a call whose own arguments aren't
+ * themselves calls. Anything more deeply nested bails to the old (still
+ * potentially undersized, not made any worse by this) behavior rather than
+ * risk a wrong match. */
+/* Whether an op_array recovered for a call the recorder left unresolved
+ * (see zend_jit_trace_resolve_init_call_op_array) is actually safe to treat
+ * as known. Covers a defaulted call to a generic function TEMPLATE (safe:
+ * generic_types==NULL means its own bytecode/arg_info never varies by
+ * binding) but excludes a MONOMORPH clone from an explicit turbofish call
+ * (substituted arg_info, still meant to stay excluded from JIT via
+ * ZEND_ACC2_MONOMORPH_TYPE_ARGS -- confirmed by a real crash in compiled
+ * code for `id::<int>` when this wasn't gated). */
+static bool zend_jit_trace_op_array_safe_to_resolve(const zend_op_array *op_array)
+{
+	return op_array && !zend_jit_op_array_is_generic_shared(op_array);
+}
+
+static const zend_op_array *zend_jit_trace_resolve_init_call_op_array(zend_jit_trace_rec *p)
+{
+	if (p->op_array) {
+		return p->op_array;
+	}
+	for (p++; ; p++) {
+		if (p->op == ZEND_JIT_TRACE_ENTER) {
+			return zend_jit_trace_op_array_safe_to_resolve(p->op_array) ? p->op_array : NULL;
+		} else if (p->op != ZEND_JIT_TRACE_VM
+		 && p->op != ZEND_JIT_TRACE_OP1_TYPE
+		 && p->op != ZEND_JIT_TRACE_OP2_TYPE
+		 && p->op != ZEND_JIT_TRACE_VAL_INFO) {
+			/* Anything else (another pending INIT_CALL, a return, the trace
+			 * end) means either genuine nested-call complexity this simple
+			 * scan doesn't attempt to resolve, or this call was never
+			 * entered within the trace at all. */
+			return NULL;
+		}
+	}
+}
+
 static zend_ssa *zend_jit_trace_build_tssa(zend_jit_trace_rec *trace_buffer, uint32_t parent_trace, uint32_t exit_num, zend_script *script, const zend_op_array **op_arrays, int *num_op_arrays_ptr)
 {
 	zend_ssa *tssa;
@@ -1395,7 +1470,7 @@ static zend_ssa *zend_jit_trace_build_tssa(zend_jit_trace_rec *trace_buffer, uin
 			ssa_ops_count += zend_jit_trace_op_len(p->opline);
 		} else if (p->op == ZEND_JIT_TRACE_INIT_CALL) {
 			call_level++;
-			stack_top += zend_jit_trace_frame_size(p->op_array, ZEND_JIT_TRACE_NUM_ARGS(p->info));
+			stack_top += zend_jit_trace_frame_size(zend_jit_trace_resolve_init_call_op_array(p), ZEND_JIT_TRACE_NUM_ARGS(p->info));
 			if (stack_top > stack_size) {
 				stack_size = stack_top;
 			}
@@ -2485,7 +2560,13 @@ propagate_arg:
 				call->used_stack = 0;
 				top = zend_jit_trace_call_frame(top, op_array, 0);
 			} else {
-				ZEND_ASSERT(&call->func->op_array == op_array);
+				/* call->func can legitimately be NULL here: the recorder
+				 * withholds it for a call it can't statically resolve (e.g.
+				 * a defaulted call to an argfree generic function template
+				 * -- see zend_jit_trace_op_array_safe_to_resolve), and nothing
+				 * in this SSA-numbering pass needs to correct it the way the
+				 * codegen pass's ENTER handler does. */
+				ZEND_ASSERT(!call->func || &call->func->op_array == op_array);
 			}
 			frame->call = call->prev;
 			call->prev = frame;
@@ -2603,7 +2684,7 @@ propagate_arg:
 					used_stack -= frame->used_stack;
 				}
 				frame = frame->prev;
-				ZEND_ASSERT(&frame->func->op_array == op_array);
+				ZEND_ASSERT(!frame->func || &frame->func->op_array == op_array);
 			} else {
 				max_used_stack = used_stack = -1;
 				frame = zend_jit_trace_ret_frame(frame, op_array);
@@ -2614,11 +2695,14 @@ propagate_arg:
 
 		} else if (p->op == ZEND_JIT_TRACE_INIT_CALL) {
 			call = top;
-			TRACE_FRAME_INIT(call, p->func, 0, 0);
+			/* See the matching fallback in zend_jit_trace()'s own INIT_CALL
+			 * handling: p->func can be NULL for a statically-known callee
+			 * now that a generic function template is JIT-eligible. */
+			TRACE_FRAME_INIT(call, p->func ? p->func : (const zend_function*)p->op_array, 0, 0);
 			call->prev = frame->call;
 			call->used_stack = 0;
 			frame->call = call;
-			top = zend_jit_trace_call_frame(top, p->op_array, ZEND_JIT_TRACE_NUM_ARGS(p->info));
+			top = zend_jit_trace_call_frame(top, zend_jit_trace_resolve_init_call_op_array(p), ZEND_JIT_TRACE_NUM_ARGS(p->info));
 			if (p->func && p->func->type == ZEND_USER_FUNCTION) {
 				for (i = 0; i < p->op_array->last_var + p->op_array->T; i++) {
 					SET_STACK_INFO(call->stack, i, -1);
@@ -6894,7 +6978,24 @@ done:
 			}
 		} else if (p->op == ZEND_JIT_TRACE_ENTER) {
 			call = frame->call;
-			assert(call && &call->func->op_array == p->op_array);
+			/* The INIT_CALL record for this call can have BOTH p->func and
+			 * p->op_array unset (a genuinely unresolved-at-record-time
+			 * callee, e.g. a defaulted call to a generic function template
+			 * dispatched by name) -- the fallback there has nothing to fall
+			 * back to. By ENTER time the recorder always knows the actual
+			 * entered function; correct call->func from it here rather than
+			 * only updating the local op_array (used directly by RECV) and
+			 * leaving call->func -- which zend_jit_verify_arg_type reads via
+			 * JIT_G(current_frame) -- stale/NULL. Only for a target this
+			 * trace is actually allowed to treat as known (excludes a
+			 * turbofish-resolved MONOMORPH clone -- see
+			 * zend_jit_trace_op_array_safe_to_resolve); call->func stays
+			 * NULL otherwise, matching pre-existing behavior for anything
+			 * this trace was never meant to see resolved here. */
+			if (!call->func && zend_jit_trace_op_array_safe_to_resolve(p->op_array)) {
+				call->func = (const zend_function*)p->op_array;
+			}
+			assert(!call->func || &call->func->op_array == p->op_array);
 
 			if (opline->opcode == ZEND_DO_UCALL
 			 || opline->opcode == ZEND_DO_FCALL_BY_NAME
@@ -6985,7 +7086,7 @@ done:
 				peek_checked_stack = frame->old_peek_checked_stack;
 				frame = frame->prev;
 				stack = frame->stack;
-				ZEND_ASSERT(&frame->func->op_array == op_array);
+				ZEND_ASSERT(!frame->func || &frame->func->op_array == op_array);
 			} else {
 				frame = zend_jit_trace_ret_frame(frame, op_array);
 				TRACE_FRAME_INIT(frame, op_array, TRACE_FRAME_MASK_UNKNOWN_RETURN, -1);
@@ -7042,7 +7143,17 @@ done:
 			}
 
 			call = top;
-			TRACE_FRAME_INIT(call, p->func, frame_flags, num_args);
+			/* p->func is NULL for a call the recorder couldn't statically
+			 * resolve (previously only possible for polymorphic/unknown
+			 * callees, handled by callers via the num_args fallback above).
+			 * Now that a generic function TEMPLATE can be JIT-compiled
+			 * directly (see zend_jit_op_array_is_generic_shared), a
+			 * defaulted call to it reaches this path with p->func unset
+			 * even though the callee IS statically known here: p->op_array
+			 * (always populated, used unconditionally just below for frame
+			 * sizing) is that same template. Fall back to it, matching the
+			 * cast already used for the root trace frame above. */
+			TRACE_FRAME_INIT(call, p->func ? p->func : (const zend_function*)p->op_array, frame_flags, num_args);
 			call->prev = frame->call;
 			if (!(p->info & ZEND_JIT_TRACE_FAKE_INIT_CALL)) {
 				TRACE_FRAME_SET_LAST_SEND_BY_VAL(call);
@@ -7073,34 +7184,48 @@ done:
 				}
 			}
 			frame->call = call;
-			top = zend_jit_trace_call_frame(top, p->op_array, ZEND_JIT_TRACE_NUM_ARGS(p->info));
-			if (p->func) {
-				if (p->func->type == ZEND_USER_FUNCTION) {
+			top = zend_jit_trace_call_frame(top, zend_jit_trace_resolve_init_call_op_array(p), ZEND_JIT_TRACE_NUM_ARGS(p->info));
+			if (p->func || (!p->op_array && zend_jit_trace_resolve_init_call_op_array(p))) {
+				/* p->func/p->op_array unset but resolvable (see
+				 * zend_jit_trace_resolve_init_call_op_array): the recorder
+				 * withheld them for a call it couldn't prove would still run
+				 * the same function by DO_FCALL time (e.g. a defaulted call
+				 * to a generic function template dispatched by name), but
+				 * this trace's own ENTER record for it proves it's a USER
+				 * function (internal functions are always resolved eagerly
+				 * -- see the recorder's own logic in
+				 * zend_jit_vm_helpers.c). Without this, call->stack[] below
+				 * is left completely uninitialized -- stale ir_refs from
+				 * whatever frame previously occupied this arena slot -- and
+				 * a later SNAPSHOT reading a "live" temporary can pick up a
+				 * reference to a control-flow node instead of a value. */
+				const zend_op_array *resolved_op_array = p->op_array ? p->op_array : zend_jit_trace_resolve_init_call_op_array(p);
+				if (!p->func || p->func->type == ZEND_USER_FUNCTION) {
 					if (JIT_G(opt_level) >= ZEND_JIT_LEVEL_INLINE) {
 						zend_jit_op_array_trace_extension *jit_extension =
-							(zend_jit_op_array_trace_extension*)ZEND_FUNC_INFO(p->op_array);
+							(zend_jit_op_array_trace_extension*)ZEND_FUNC_INFO(resolved_op_array);
 
 						i = 0;
-						while (i < p->op_array->num_args) {
+						while (i < resolved_op_array->num_args) {
 							/* Types of arguments are going to be stored in abstract stack when processing SEV instruction */
 							SET_STACK_TYPE(call->stack, i, IS_UNKNOWN, 1);
 							i++;
 						}
-						while (i < p->op_array->last_var) {
+						while (i < resolved_op_array->last_var) {
 							if (jit_extension
-							 && zend_jit_var_may_alias(p->op_array, &jit_extension->func_info.ssa, i) != NO_ALIAS) {
+							 && zend_jit_var_may_alias(resolved_op_array, &jit_extension->func_info.ssa, i) != NO_ALIAS) {
 								SET_STACK_TYPE(call->stack, i, IS_UNKNOWN, 1);
 							} else {
 								SET_STACK_TYPE(call->stack, i, IS_UNDEF, 1);
 							}
 							i++;
 						}
-						while (i < p->op_array->last_var + p->op_array->T) {
+						while (i < resolved_op_array->last_var + resolved_op_array->T) {
 							SET_STACK_TYPE(call->stack, i, IS_UNKNOWN, 1);
 							i++;
 						}
 					} else {
-						for (i = 0; i < p->op_array->last_var + p->op_array->T; i++) {
+						for (i = 0; i < resolved_op_array->last_var + resolved_op_array->T; i++) {
 							SET_STACK_TYPE(call->stack, i, IS_UNKNOWN, 1);
 						}
 					}
