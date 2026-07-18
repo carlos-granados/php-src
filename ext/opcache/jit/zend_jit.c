@@ -3323,14 +3323,63 @@ static int zend_jit_setup_hot_counters(zend_op_array *op_array)
  * generics and their monomorphs interpreted. */
 static bool zend_jit_op_array_is_generic_shared(const zend_op_array *op_array)
 {
-	return op_array->generic_parameters
-		|| (op_array->fn_flags2 & (ZEND_ACC2_MONOMORPH_TYPE_ARGS | ZEND_ACC2_GENERIC_ARGINFO_CLONE))
-		|| (op_array->scope && op_array->scope->generic_parameters)
-		/* A pre-erasure type table means the signature or body carries
-		 * T-refs resolved per call (compile-time method clones of a
-		 * generic parent, closures capturing an outer T): same
-		 * shared-buffer / per-binding-arg_info hazard as above. */
-		|| op_array->generic_types;
+	if (op_array->generic_parameters
+		|| (op_array->fn_flags2 & (ZEND_ACC2_MONOMORPH_TYPE_ARGS | ZEND_ACC2_GENERIC_ARGINFO_CLONE))) {
+		return true;
+	}
+	/* A pre-erasure type table on THIS op_array (generic_types != NULL) means
+	 * SOMETHING about it is T-dependent: either its own signature (checked
+	 * precisely by zend_substitute_trait_method_arg_info via ->parameters/
+	 * ->return_type -- same shared-buffer / per-binding-arg_info hazard the
+	 * ARGINFO_CLONE check above guards against), or -- the case that bit us
+	 * empirically -- a turbofish call site inside its body caches a
+	 * ->turbofish_args table there too, and JIT-compiling THAT op_array (even
+	 * though ITS OWN signature is T-free) exposed a real, pre-existing bug in
+	 * the JIT's closure call-frame teardown for a T-capturing closure invoked
+	 * from newly-JIT-eligible code (2 leak-only failures under function-mode
+	 * JIT, tracked separately -- see php-generics-jit-monomorphs memory).
+	 * Rather than characterize every way generic_types can matter, exclude
+	 * on ANY population of it, matching this function's ORIGINAL blanket
+	 * `|| op_array->generic_types` clause exactly -- the actual goal here
+	 * (T-free shared class methods with no turbofish anywhere in their body,
+	 * e.g. doctrine's ArrayCollection::map()) never allocates generic_types
+	 * at all, so it's unaffected either way. */
+	if (op_array->generic_types) {
+		return true;
+	}
+	/* Closures can resolve an outer T (from the frame that created them) via a
+	 * SEPARATE, runtime frame-capture mechanism (zend_closure_capture_type_args
+	 * / the DO_FCALL captured-T check) that doesn't necessarily leave a mark on
+	 * THIS op_array's own generic_types. That's a CORRECTNESS concern, not a
+	 * compilation-safety one, though, and it's already fully handled independent
+	 * of whether this op_array gets JIT-compiled: zend_jit_do_fcall's captured-T
+	 * check runs at the CALL SITE against call->type_args regardless of the
+	 * callee's own compiled/interpreted status (see
+	 * zend_jit_verify_closure_captured_arg_types_helper). A closure's own
+	 * compiled bytecode (RECV/VERIFY_RETURN_TYPE against its erased bound) is
+	 * identical for every possible captured binding -- there is no "compiling
+	 * the base corrupts its siblings" hazard here the way there is for a
+	 * per-monomorph SUBSTITUTED arg_info clone, so excluding these closures
+	 * from compilation was solving the correctness problem in the wrong place.
+	 * Tried it anyway (ZEND_ACC2_CLOSURE_MAY_CAPTURE_T, propagated at compile
+	 * time from the lexically enclosing generic scope) and it measurably
+	 * regressed real code: PSL's OWN internal implementation closures (declared
+	 * lexically inside its now-generic Vec/Dict functions, e.g. the map/filter
+	 * adapter closures) got caught by the propagation and lost JIT compilation
+	 * entirely, costing double digits of percent on a call-dense workload --
+	 * confirmed by instrumenting this function to log every op_array where the
+	 * decision differed from this function's original behavior. Removed. */
+	/* A method declared directly on a generic class (scope->generic_parameters)
+	 * but with NEITHER of the above -- no T anywhere in its own signature --
+	 * is shared verbatim (same zend_op_array pointer) across every monomorph
+	 * of that class: no substitution ever touches it, so there is exactly
+	 * ONE copy of its bytecode/arg_info/literals to compile, and every
+	 * monomorph's calls hit the identical, binding-independent behavior.
+	 * Compiling it once here is as safe as compiling any ordinary method;
+	 * the "compiling the base corrupts its siblings" hazard this whole
+	 * function exists to prevent only applies to op_arrays that actually
+	 * get a per-monomorph substituted copy. */
+	return false;
 }
 
 int zend_jit_op_array(zend_op_array *op_array, zend_script *script)

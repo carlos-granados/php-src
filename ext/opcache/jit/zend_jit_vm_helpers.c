@@ -375,6 +375,44 @@ bool ZEND_FASTCALL zend_jit_verify_speculative_generic_call_helper(OPLINE_D)
 	return true;
 }
 
+/* JIT counterpart of DO_FCALL's closure-captured-T value check (zend_vm_def.h,
+ * ~line 4475: "if (call->type_args && (fbc->common.fn_flags & ZEND_ACC_CLOSURE))").
+ * A closure created inside a generic frame carries that frame's T-table
+ * (call->type_args, set by zend_vm_init_call_frame / zend_jit_push_call_frame's
+ * is_closure branch), and the interpreter runs zend_verify_generic_arg_types
+ * against it before the closure body executes -- catching argument values that
+ * satisfy the closure's own (erased-bound) declared type but violate the more
+ * specific CAPTURED binding. JIT's native codegen for DO_FCALL never called
+ * this: it correctly propagates call->type_args into the frame (see the
+ * is_closure branch in zend_jit_push_call_frame) but nothing then verifies
+ * argument values against it, so a JIT-compiled caller silently skips this
+ * check. This was unreachable in practice as long as
+ * zend_jit_op_array_is_generic_shared kept every generics-adjacent code path
+ * interpreted; it's exercised now that a caller invoking a T-capturing closure
+ * can itself be JIT-compiled. Manual cleanup (not the standard unwinder)
+ * mirrors zend_jit_verify_speculative_generic_call_helper immediately above,
+ * for the same reason. */
+bool ZEND_FASTCALL zend_jit_verify_closure_captured_arg_types_helper(OPLINE_D)
+{
+	zend_execute_data *call = (zend_execute_data *) opline;
+
+	zend_verify_generic_arg_types(call, NULL);
+
+	if (UNEXPECTED(EG(exception))) {
+#ifndef HAVE_GCC_GLOBAL_REGS
+		zend_execute_data *execute_data = EG(current_execute_data);
+#endif
+		const zend_op *opline = EG(opline_before_exception);
+		if (opline && RETURN_VALUE_USED(opline)) {
+			ZVAL_UNDEF(EX_VAR(opline->result.var));
+		}
+
+		zend_cleanup_unentered_speculative_call(call);
+		return false;
+	}
+	return true;
+}
+
 void ZEND_FASTCALL zend_jit_undefined_long_key(EXECUTE_DATA_D)
 {
 	const zend_op *opline = EX(opline);

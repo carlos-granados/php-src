@@ -3130,6 +3130,7 @@ static void zend_jit_setup_disasm(void)
 	REGISTER_HELPER(zend_jit_verify_return_slow);
 	REGISTER_HELPER(zend_jit_deprecated_helper);
 	REGISTER_HELPER(zend_jit_verify_speculative_generic_call_helper);
+	REGISTER_HELPER(zend_jit_verify_closure_captured_arg_types_helper);
 	REGISTER_HELPER(zend_jit_undefined_long_key);
 	REGISTER_HELPER(zend_jit_undefined_long_key_ex);
 	REGISTER_HELPER(zend_jit_undefined_string_key);
@@ -10334,6 +10335,56 @@ static int zend_jit_do_fcall(zend_jit_ctx *jit, const zend_op *opline, const zen
 				ret = ir_CALL_1(IR_BOOL, ir_CONST_FC_FUNC(zend_jit_verify_speculative_generic_call_helper), rx);
 			}
 			ir_GUARD(ret, jit_STUB_ADDR(jit, jit_stub_exception_handler));
+		}
+	}
+
+	/* JIT counterpart of DO_FCALL's closure-captured-T value check
+	 * (zend_vm_def.h, "if (call->type_args && (fbc->common.fn_flags &
+	 * ZEND_ACC_CLOSURE))") -- see zend_jit_verify_closure_captured_arg_types_helper
+	 * (zend_jit_vm_helpers.c) for why this is needed independently of the
+	 * naked-generic-call check just above (closures capture an outer T via a
+	 * separate runtime frame-capture mechanism, not per-monomorph arg_info
+	 * cloning, and don't generally carry generic_parameters themselves).
+	 * DO_FCALL only: DO_UCALL/DO_FCALL_BY_NAME never reach a closure callee
+	 * this way (see the interpreter handler). call->type_args itself was
+	 * already stored into the frame by zend_jit_push_call_frame's is_closure
+	 * branch; this only adds the value CHECK against it. */
+	if (opline->opcode == ZEND_DO_FCALL) {
+		ir_ref if_ta, type_args_ref, ret;
+		if (!func) {
+			if (!trace) {
+				ir_ref if_closure, fnflags_ref;
+				fnflags_ref = ir_LOAD_U32(ir_ADD_OFFSET(func_ref, offsetof(zend_function, common.fn_flags)));
+				if_closure = ir_IF(ir_AND_U32(fnflags_ref, ir_CONST_U32(ZEND_ACC_CLOSURE)));
+				ir_IF_TRUE_cold(if_closure);
+
+				type_args_ref = ir_LOAD_A(jit_CALL(rx, type_args));
+				if_ta = ir_IF(type_args_ref);
+				ir_IF_TRUE_cold(if_ta);
+
+				if (GCC_GLOBAL_REGS) {
+					ret = ir_CALL(IR_BOOL, ir_CONST_FC_FUNC(zend_jit_verify_closure_captured_arg_types_helper));
+				} else {
+					ret = ir_CALL_1(IR_BOOL, ir_CONST_FC_FUNC(zend_jit_verify_closure_captured_arg_types_helper), rx);
+				}
+				ir_GUARD(ret, jit_STUB_ADDR(jit, jit_stub_exception_handler));
+
+				ir_MERGE_WITH_EMPTY_FALSE(if_ta);
+				ir_MERGE_WITH_EMPTY_FALSE(if_closure);
+			}
+		} else if (func->common.fn_flags & ZEND_ACC_CLOSURE) {
+			type_args_ref = ir_LOAD_A(jit_CALL(rx, type_args));
+			if_ta = ir_IF(type_args_ref);
+			ir_IF_TRUE_cold(if_ta);
+
+			if (GCC_GLOBAL_REGS) {
+				ret = ir_CALL(IR_BOOL, ir_CONST_FC_FUNC(zend_jit_verify_closure_captured_arg_types_helper));
+			} else {
+				ret = ir_CALL_1(IR_BOOL, ir_CONST_FC_FUNC(zend_jit_verify_closure_captured_arg_types_helper), rx);
+			}
+			ir_GUARD(ret, jit_STUB_ADDR(jit, jit_stub_exception_handler));
+
+			ir_MERGE_WITH_EMPTY_FALSE(if_ta);
 		}
 	}
 
