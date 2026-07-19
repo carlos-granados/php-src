@@ -30,10 +30,28 @@ typedef struct _zend_closure {
 	zend_class_entry *called_scope;
 	zif_handler       orig_internal_handler;
 	/* Snapshot of the generic type-arg table from the frame that created
-	 * the closure. The closure owns the allocation; it is marked persisted
-	 * so call-frame teardown skips destroying it. Cleared on closure
-	 * free_obj. NULL when the closure was created outside a generic frame. */
+	 * the closure. NULL when the closure was created outside a generic
+	 * frame. Cleared on closure free_obj.
+	 *
+	 * Two distinct cases, told apart by captured_type_args_shared:
+	 *  - Exclusively owned (shared=false): the closure holds the only
+	 *    reference (zend_type_arg_table_capture_or_share deep-cloned
+	 *    because the source wasn't already guaranteed to outlive this
+	 *    frame). Marked persisted so call-frame teardown skips destroying
+	 *    it; free_obj un-persists and destroys it.
+	 *  - Shared (shared=true): the source table was already persisted
+	 *    (e.g. a naked call's per-function defaults-cache table, see
+	 *    Zend/zend_compile.c) and therefore already guaranteed to outlive
+	 *    this closure regardless -- capture_or_share returned the SAME
+	 *    pointer instead of cloning it, to avoid the clone's allocation +
+	 *    per-entry copy work entirely (this is the common case for a
+	 *    closure created inside a generic function body and never escaping
+	 *    it, e.g. `array_map(static fn($v) => ..., $x)`). free_obj must
+	 *    NOT touch persisted or destroy this pointer -- its real owner
+	 *    (the defaults-cache, released at request/class-teardown) still
+	 *    references it. */
 	struct _zend_type_arg_table *captured_type_args;
+	bool captured_type_args_shared;
 } zend_closure;
 
 /* This macro depends on zend_closure structure layout */

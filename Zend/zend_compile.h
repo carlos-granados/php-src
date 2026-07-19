@@ -277,6 +277,26 @@ typedef struct _zend_type_arg_table {
 	 * a closure over a persisted monomorph memcpy's the op_array (clearing
 	 * IMMUTABLE), and writing entry slots in protected SHM segfaults. */
 	bool shm;
+	/* True only when this table's lifecycle is owned by a specific,
+	 * already-audited long-lived mechanism external to whatever currently
+	 * holds a pointer to it: the per-call-site/per-function naked-call
+	 * defaults cache (zend_build_or_get_cached_type_args,
+	 * Zend/zend_compile.c), or a class monomorph's own `generic_type_args`
+	 * (zend_synthesize_monomorph, Zend/zend_inheritance.c). Sharing (rather
+	 * than deep-cloning) a table with `owner_external` set is safe because
+	 * that owner's own release path is unconditional and independent of
+	 * however many other places also point at it.
+	 *
+	 * `persisted` alone can't answer this: it's ALSO set on a closure's own
+	 * exclusively-owned capture-clone (captured_type_args in
+	 * Zend/zend_closures.h) purely to survive that closure's *creating*
+	 * frame's teardown -- that table has exactly one owner (the closure
+	 * itself) that must still deep-clone if capturing it again (e.g.
+	 * Closure::bindTo rebinding to a new closure), or the original would be
+	 * silently orphaned with no one left to ever release it. Defaults to
+	 * false; only zend_type_arg_table_capture_or_share's callers rely on
+	 * it, and only the sites above ever set it true. */
+	bool owner_external;
 	zend_type_arg_entry entries[1];
 } zend_type_arg_table;
 
@@ -352,6 +372,7 @@ static zend_always_inline zend_turbofish_args_entry *zend_generic_get_or_cache_a
 ZEND_API zend_type_arg_table *zend_type_arg_table_alloc(uint32_t count);
 ZEND_API void zend_type_arg_table_destroy(zend_type_arg_table *table);
 ZEND_API zend_type_arg_table *zend_type_arg_table_capture_clone(const zend_type_arg_table *src);
+ZEND_API zend_type_arg_table *zend_type_arg_table_capture_or_share(const zend_type_arg_table *src);
 ZEND_API zend_string *zend_type_arg_canonical_name(zend_type type);
 ZEND_API zend_type_arg_table *zend_build_generic_call_type_args(zend_execute_data *call, const zend_type *args_box);
 ZEND_API zend_type_arg_table *zend_build_or_get_cached_type_args(zend_execute_data *call, const zend_type *args_box, void **cache_slot);

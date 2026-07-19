@@ -804,6 +804,12 @@ ZEND_API zend_type_arg_table *zend_build_or_get_cached_type_args(
 			cache_slot[0] = nt;
 			cache_slot[1] = (void *)nkey;
 			nt->persisted = true;
+			/* Audited long-lived owner (this cache slot) -- see the field
+			 * comment in Zend/zend_compile.h. Lets a closure created inside
+			 * this call's body (e.g. array_map(static fn($v) => ..., $x))
+			 * share this table via zend_type_arg_table_capture_or_share
+			 * instead of deep-cloning it on every single call. */
+			nt->owner_external = true;
 #ifdef ZEND_GENERICS_STATS
 			EG(generics_callsite_cache_entries)++;
 #endif
@@ -821,6 +827,8 @@ ZEND_API zend_type_arg_table *zend_build_or_get_cached_type_args(
 		cache_slot[0] = t;
 		cache_slot[1] = (void *)key;
 		t->persisted = true;
+		/* See the matching comment on the naked-call cache above. */
+		t->owner_external = true;
 #ifdef ZEND_GENERICS_STATS
 		EG(generics_callsite_cache_entries)++;
 #endif

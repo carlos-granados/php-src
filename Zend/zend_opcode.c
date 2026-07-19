@@ -358,6 +358,7 @@ ZEND_API zend_type_arg_table *zend_type_arg_table_alloc(uint32_t count) {
 	table->generation = zend_type_arg_table_generation_counter++;
 	table->persisted = false;
 	table->shm = false;
+	table->owner_external = false;
 	for (uint32_t i = 0; i < count; i++) {
 		table->entries[i].name = NULL;
 		table->entries[i].type_ref = NULL;
@@ -408,6 +409,29 @@ ZEND_API zend_type_arg_table *zend_type_arg_table_capture_clone(const zend_type_
 		}
 	}
 	return dst;
+}
+
+/* Like zend_type_arg_table_capture_clone, but avoids the clone entirely when
+ * `src->owner_external` is set -- i.e. `src` is already owned by a specific,
+ * already-audited long-lived mechanism (see the field comment on
+ * `owner_external` in Zend/zend_compile.h), so it's already guaranteed to
+ * outlive this call regardless of who captures it. In that case the caller
+ * gets the SAME pointer back, not a copy: the caller MUST compare the return
+ * value against `src` by pointer identity and, if equal, treat it as a
+ * borrowed reference it must never mark non-persisted or destroy (see
+ * captured_type_args_shared in Zend/zend_closures.h for the pattern).
+ * Deliberately checks `owner_external`, not the broader `persisted` (every
+ * externally-owned table is persisted, but not every persisted table is
+ * externally-owned -- a closure's own exclusively-owned capture-clone is
+ * ALSO persisted, purely to survive its creating frame's teardown; sharing
+ * that one instead of cloning would leave it with no owner left to ever
+ * release it once the original closure is gone). Falls back to a real clone
+ * for every other case, exactly as before. */
+ZEND_API zend_type_arg_table *zend_type_arg_table_capture_or_share(const zend_type_arg_table *src) {
+	if (src && src->owner_external) {
+		return (zend_type_arg_table *) src;
+	}
+	return zend_type_arg_table_capture_clone(src);
 }
 
 /* Always returns the canonical name of the bound type — class names, monomorph

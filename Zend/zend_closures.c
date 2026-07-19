@@ -621,8 +621,10 @@ static void zend_closure_free_storage(zend_object *object) /* {{{ */
 	}
 
 	if (closure->captured_type_args) {
-		closure->captured_type_args->persisted = false;
-		zend_type_arg_table_destroy(closure->captured_type_args);
+		if (!closure->captured_type_args_shared) {
+			closure->captured_type_args->persisted = false;
+			zend_type_arg_table_destroy(closure->captured_type_args);
+		}
 		closure->captured_type_args = NULL;
 	}
 }
@@ -935,12 +937,17 @@ ZEND_API void zend_closure_capture_type_args(zval *closure_zv, zend_type_arg_tab
 {
 	zend_closure *closure = (zend_closure *) Z_OBJ_P(closure_zv);
 	if (closure->captured_type_args) {
-		closure->captured_type_args->persisted = false;
-		zend_type_arg_table_destroy(closure->captured_type_args);
+		if (!closure->captured_type_args_shared) {
+			closure->captured_type_args->persisted = false;
+			zend_type_arg_table_destroy(closure->captured_type_args);
+		}
 		closure->captured_type_args = NULL;
+		closure->captured_type_args_shared = false;
 	}
 	if (src) {
-		closure->captured_type_args = zend_type_arg_table_capture_clone(src);
+		zend_type_arg_table *captured = zend_type_arg_table_capture_or_share(src);
+		closure->captured_type_args = captured;
+		closure->captured_type_args_shared = (captured == src);
 	}
 }
 /* }}} */
