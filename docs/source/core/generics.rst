@@ -386,6 +386,50 @@ turbofish doesn't emit the opcode, and the surrounding ``INIT_*`` and ``ZEND_NEW
 specializations are unaffected. The deferred ``instanceof`` / ``catch`` lookup likewise falls
 through to ``zend_fetch_class`` like any other ``IS_UNUSED`` class operand.
 
+Cross-request class-monomorph reuse and ``opcache.preload``
+=============================================================
+
+``zend_monomorph_cache_get`` / ``zend_monomorph_cache_add`` (``Zend/zend_inheritance.c``) let a
+runtime-synthesized class monomorph be promoted into opcache SHM and reused by every subsequent
+request in the pool, instead of being rebuilt per request. The cache is gated strictly on the
+*template* class being ``ZEND_ACC_IMMUTABLE`` (``zend_synthesize_monomorph`` checks
+``base->ce_flags & ZEND_ACC_IMMUTABLE`` before consulting it at all) — a mutable (per-request)
+template can never have its monomorphs shared, since the template itself doesn't outlive the
+request.
+
+Whether a generic class ends up immutable depends on how it was linked, not on whether it's
+generic. A class becomes immutable when opcache can compile-time-link it — no cross-file
+interface/parent dependency that would require triggering autoload during linking. Composer's
+autoload order routinely defeats this for real class hierarchies (an interface or parent needed
+for linking isn't compiled yet when the implementing class is first compiled), leaving the class
+— and therefore every monomorph synthesized from it — mutable and rebuilt fresh every request.
+Measured on ``doctrine/collections``' ``ArrayCollection`` (implements ``Collection``,
+``Selectable``, ``Stringable`` across separate files) under a persistent worker
+(``php-cgi -T<N>,1``): without preload, ``class_monomorphs`` grows linearly with request count
+(4 → 88 over 21 requests, 4 → 404 over 100) — every request re-synthesizes its own
+``ArrayCollection<int,int>`` from scratch. This is the concrete shape of the "unbounded monomorph
+growth" concern raised during the RFC's internals discussion.
+
+``opcache.preload`` forces early/immutable linking of a class hierarchy explicitly, ahead of
+serving any request, by having the preload script actually reference the classes (e.g.
+``class_exists()``) rather than just registering an autoloader for them. Once the template is
+immutable, the class-monomorph cache activates and ``class_monomorphs`` stays flat regardless of
+request count, in the same measurement above. This is the recommended mitigation for a
+long-lived worker (php-fpm, RoadRunner, Swoole) serving traffic through a generic class whose
+hierarchy spans multiple files. Type-arg tables (function/method-level bindings, ``EX(type_args)``)
+are unaffected by preload — they're per-call-frame data by design (see above) and are not
+persisted to SHM.
+
+Preloading a generic class hierarchy where a child inherits a T-free method unchanged from a
+generic parent (the common case — ``count()``/``isEmpty()``-style helpers that never reference
+the type parameter, shared rather than cloned per the identity-substitution rule) requires the
+fix in ``preload_register_trait_methods`` (``ext/opcache/ZendAccelerator.c``): earlier, this
+crashed outright on two bugs — treating an inherited internal-function entry (e.g. from an
+interface with a default implementation) as a ``zend_op_array``, and double-registering a
+shared, un-cloned method's refcount pointer once per class in the hierarchy that inherits it.
+Both are fixed; see ``Zend/tests/generics/opcache/preload_generic.inc`` and
+``preload_monomorph_synthesis.phpt`` for the regression coverage.
+
 Test coverage matrix
 ********************
 

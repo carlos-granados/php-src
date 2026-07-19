@@ -48,6 +48,44 @@ Compilation dominates cold: e.g. plain_request jit-on drops 26.6M (cold) → 8.3
 (warm); generic_request 30.0M → 10.5M. Warm is ~3x cheaper and is the number
 that matters for deployed code.
 
+## 5. Re-evaluation after landing subsequent Phase 5/6 fixes (2026-07-19)
+
+Re-ran the canary and plain/generic_request cells (same methodology, `WARMUP=20`)
+on a freshly rebuilt `reify-src` at current HEAD (`8e14f8a2a70`), which since the
+snapshot above (`baseline-pass1-original.json`) added: non-generic-tax-focused
+compile/link-path optimizations, the T-free shared-class-method JIT fix, JIT-traced
+non-generic-loop-calling-generic-monomorph narrowing, composite generic type
+enforcement, and the opcache preload crash fixes (both the original monomorph one
+and this session's inherited-method one). Fresh data in `baseline.json`.
+
+**Non-generic tax (canary) is unchanged, within noise:**
+
+| phase | JIT | previous delta_pct | current delta_pct | diff |
+|-------|-----|--------------------:|-------------------:|-----:|
+| cold | off | 2.040% | 2.041% | +0.001pp |
+| cold | on  | 2.008% | 2.011% | +0.003pp |
+| warm | off | 2.039% | 2.039% | +0.000pp |
+| warm | on  | 2.024% | 2.024% | +0.000pp |
+
+Expected: the fixes landed since the snapshot are all gated behind a cheap
+`op_array->generic_parameters` / `ce->generic_parameters` null check for
+non-generic code, so they shouldn't move this number either direction. Confirms
+the ~2% non-generic tax is stable, not drifting as more generics machinery lands.
+
+**Cost of using generics (synthetic plain/generic_request twin) improved modestly:**
+
+| phase | JIT | previous (vs plain-master) | current | diff |
+|-------|-----|----------------------------:|--------:|-----:|
+| cold | off | 5.592% | 5.310% | −0.282pp |
+| cold | on  | 7.275% | 6.971% | −0.304pp |
+| warm | off | 16.204% | 14.902% | −1.302pp |
+| **warm** | **on** | **27.889%** | **25.830%** | **−2.059pp** |
+
+Smaller improvement than the real-world doctrine/psl workloads have shown in the
+Pass-2 series (this micro workload isn't the doctrine-collection-heavy shape those
+fixes specifically targeted), but consistent direction — no regression from any
+recently landed change, small further improvement in the JIT-warm production case.
+
 ## 4. Monomorph counters
 
 `new Box::<int>()` → `class_monomorphs`+1, `type_arg_tables`+1. Non-generic code

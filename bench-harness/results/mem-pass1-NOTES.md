@@ -121,3 +121,47 @@ in this workload.
   Callgrind). Not checked in, same precedent as the Ir passes' driver script.
 - Builds/workload trees: reused unchanged from the Ir passes
   (`/root/bench-builds/{master,reify}-src`, `/tmp/pass2/*`).
+
+## Follow-up (2026-07-19): the cross-request growth gap is closed by `opcache.preload`
+
+The "not reused across requests" finding above is a linking-mode issue, not an
+inherent limit: `zend_monomorph_cache_get`/`add` (the SHM class-monomorph reuse
+mechanism) only activates when the *template* class is `ZEND_ACC_IMMUTABLE`,
+and composer's autoload order routinely prevents that for real hierarchies
+(`ArrayCollection` implements `Collection`/`Selectable`/`Stringable` across
+separate files, so opcache can't early-link it at normal compile time).
+`opcache.preload` forces early/immutable linking explicitly ahead of serving
+any request — but doing so used to crash outright on exactly this shape of
+hierarchy (a child inheriting a T-free method unchanged from a generic parent
+hit two bugs in `preload_register_trait_methods`, fixed in commit
+`8e14f8a2a70`).
+
+Re-measured the same doctrine/collections workload (`reify-src` rebuilt at
+current HEAD, `php-cgi -T<N>,1`, opcache on / JIT off / warm), with a
+genuinely cold SHM segment per cell (re-materializing the doctrine source
+directory before each run — reusing the same file paths across cells silently
+inherits an already-immutable class entry from opcache's persistent SHM,
+which understated the "without preload" baseline the first time this was
+tried):
+
+| requests | `class_monomorphs`, no preload | `class_monomorphs`, with preload |
+|---:|---:|---:|
+| 21 | 88 (4 → 88, linear) | 4 (flat) |
+| 100 | 404 (4 → 404, linear) | 4 (flat) |
+
+Output was byte-identical (`acc=9050`) across every request in both cases —
+preload changes only the memory-growth shape, not behavior. Peak RSS was
+close either way (~32 MB) since this workload's per-monomorph cost is small;
+the payoff is structural (bounded vs. unbounded growth over request count),
+which matters for sustained production traffic rather than a short run.
+Type-arg tables (function/method-level, `EX(type_args)`) are unaffected by
+preload — they're per-call-frame by design, not persisted to SHM, and grow
+with call volume in both configs.
+
+Audited beyond the minimal regression test before trusting this: a real
+Doctrine subclass hierarchy with the full interface chain and T-forwarding
+generic methods, a trait + PHP 8.4 property hooks + multi-level generic
+inheritance combined, and a 4-level-deep generic inheritance chain — all
+preloaded cleanly with correct output and flat monomorph counts across
+repeated requests. See `docs/source/core/generics.rst` ("Cross-request
+class-monomorph reuse and `opcache.preload`") for the write-up.
