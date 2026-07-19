@@ -1,4 +1,4 @@
-# bench-harness — reified-generics benchmark harness (Phase 4)
+# bench-harness — reified-generics benchmark harness
 
 Reproducible instruction-count benchmarks comparing the `reify` branch against
 its `master` merge-base, plus the monomorph-counter instrumentation.
