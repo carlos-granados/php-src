@@ -165,3 +165,36 @@ inheritance combined, and a 4-level-deep generic inheritance chain — all
 preloaded cleanly with correct output and flat monomorph counts across
 repeated requests. See `docs/source/core/generics.rst` ("Cross-request
 class-monomorph reuse and `opcache.preload`") for the write-up.
+
+**Correction:** the "type-arg tables are unaffected by preload" line above
+was wrong — measured before checking. Preload actually made per-call
+type-arg-table churn *worse*: `zend_verify_speculative_generic_call`'s
+naked-call memoization (`a10b4913335`, "cache defaulted generic call
+type-args per function") was deliberately skipped for `ZEND_ACC_IMMUTABLE`
+op_arrays, because a table cached there would leak every request (confirmed
+via the debug build's own leak detector: 2 leaks/request on this exact
+workload, `Zend/zend_opcode.c:341` — `destroy_op_array`/`destroy_zend_class`
+never run for an immutable/SHM class, so nothing ever released it). Result:
+every naked call to a preloaded generic method (`map<U>`, `contains<T>`
+here) rebuilt its table from scratch, every time — 100 tables/50-iteration
+request instead of the ~6 a mutable class gets from the same memoization.
+
+| requests | `type_arg_tables`, no preload | `type_arg_tables`, preload (before fix) | `type_arg_tables`, preload (after fix) |
+|---:|---:|---:|---:|
+| 10 | 60 (6/request) | 1,000 (100/request) | 20 (2/request) |
+
+Fixed in commit `bca66b0dbc7` ("fix type-arg-table leak on preloaded generic
+methods"): `EG(immutable_defaults_cache_tables)`, a fixed-size 64-slot
+inline array in `zend_executor_globals` (no separate heap allocation, so
+nothing for the debug leak scanner to flag — a dynamically-grown
+`zend_ptr_stack` was tried first and, despite being correctly freed every
+request, still triggered a one-time false-positive leak report the moment
+it grew), tracks tables cached into an immutable op_array's slot this
+request; `shutdown_executor()` releases them before the request ends. Net:
+memoization now works within a request for preloaded methods too (2/request,
+not flat across requests — opcache zeroes preloaded op_arrays'
+`run_time_cache` at the start of every request regardless, so true
+cross-request persistence isn't achievable here the way it is for class
+monomorphs), and the debug build's leak count for this workload is back to
+zero. Output unchanged (`acc=905` throughout); full generics suite (518),
+Zend+opcache+reflection suite (6814), and JIT-tracing subset all clean.

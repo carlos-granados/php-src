@@ -416,9 +416,23 @@ serving any request, by having the preload script actually reference the classes
 immutable, the class-monomorph cache activates and ``class_monomorphs`` stays flat regardless of
 request count, in the same measurement above. This is the recommended mitigation for a
 long-lived worker (php-fpm, RoadRunner, Swoole) serving traffic through a generic class whose
-hierarchy spans multiple files. Type-arg tables (function/method-level bindings, ``EX(type_args)``)
-are unaffected by preload — they're per-call-frame data by design (see above) and are not
-persisted to SHM.
+hierarchy spans multiple files.
+
+Type-arg tables (function/method-level bindings, ``EX(type_args)``) are per-call-frame data by
+design and are never persisted to SHM the way class monomorphs are — but a naked (non-turbofish)
+call to a generic function/method still memoizes its all-defaults table once per process, via a
+2-slot cache reserved on the callee's own ``run_time_cache`` (``defaults_cache_slot``, see
+``zend_verify_speculative_generic_call``). For a *preloaded* generic method this memoization is
+necessarily request-scoped, not process-scoped: opcache zeroes a preloaded op_array's
+``run_time_cache`` contents at the start of every request (``accel_activate``), so a table cached
+there can never survive to the next request regardless. Because ``destroy_op_array`` /
+``destroy_zend_class`` never run for an immutable/SHM class, a table cached this way also has no
+reclaim path through the normal per-op_array route — ``EG(immutable_defaults_cache_tables)``, a
+fixed-size inline array in ``zend_executor_globals`` (no separate allocation, so nothing for a
+debug build's leak scanner to flag), tracks every table stashed into an immutable op_array's slot
+this request; ``shutdown_executor()`` releases them before the request ends. Net effect: a naked
+call to a preloaded generic method still collapses to one table build per distinct call within a
+request (not one per call), just not across requests the way class monomorphs do.
 
 Preloading a generic class hierarchy where a child inherits a T-free method unchanged from a
 generic parent (the common case — ``count()``/``isEmpty()``-style helpers that never reference
