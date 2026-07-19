@@ -8609,6 +8609,15 @@ ZEND_API zend_function *zend_synthesize_function_monomorph(
 		mono_targs->generation = 0;
 		mono_targs->persisted = true;
 		mono_targs->shm = false;
+		/* Not audited for zend_type_arg_table_capture_or_share's sharing
+		 * fast path (Zend/zend_opcode.c) -- leave false so a closure
+		 * capturing this table still deep-clones it, exactly as before
+		 * that function existed. Must still be explicitly initialized:
+		 * this table is arena-allocated directly (not via
+		 * zend_type_arg_table_alloc, which zero-initializes every field),
+		 * so leaving it unset is a read of uninitialized memory the first
+		 * time anything checks it. */
+		mono_targs->owner_external = false;
 		for (uint32_t i = 0; i < tcount; i++) {
 			mono_targs->entries[i].name = NULL;
 			mono_targs->entries[i].type_ref = NULL;

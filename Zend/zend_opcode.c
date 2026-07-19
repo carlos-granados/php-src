@@ -981,6 +981,23 @@ static void zend_release_defaults_cache_slot(zend_op_array *op_array)
 	 || !ZEND_MAP_PTR(op_array->run_time_cache)) {
 		return;
 	}
+	if (op_array->fn_flags & ZEND_ACC_IMMUTABLE) {
+		/* A table cached here on an immutable op_array is tracked and
+		 * released separately, by EG(immutable_defaults_cache_tables) at
+		 * shutdown_executor() (see zend_verify_speculative_generic_call,
+		 * Zend/zend_compile.c) -- immutable op_arrays don't get the
+		 * cross-request SHM reuse that would make destroying it here safe
+		 * to skip entirely, but destroy_op_array DOES still reach a
+		 * standalone immutable function's op_array during normal shutdown
+		 * (unlike an immutable class's methods, which destroy_zend_class's
+		 * own early-return skips). Without this guard, a naked call to a
+		 * generic top-level function that opcache made immutable (even via
+		 * ordinary SHM script caching, not just preload) segfaults at
+		 * shutdown: the table gets destroyed once here AND once by the
+		 * immutable-tracking release, and the second destroy dereferences
+		 * already-freed memory. */
+		return;
+	}
 	char *cache_buf = (char *) ZEND_MAP_PTR_GET(op_array->run_time_cache);
 	if (!cache_buf) {
 		return;
