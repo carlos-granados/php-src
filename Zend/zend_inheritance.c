@@ -7639,16 +7639,35 @@ ZEND_API zend_class_entry *zend_synthesize_monomorph(
 				ALLOCA_FLAG(sub_use_heap)
 				zend_type *sub_args = do_alloca(
 					sizeof(zend_type) * impl_nwa->count, sub_use_heap);
+				ALLOCA_FLAG(sub_alloc_use_heap)
+				bool *sub_allocates = do_alloca(
+					sizeof(bool) * impl_nwa->count, sub_alloc_use_heap);
 				bool all_ground = true;
+				uint32_t substituted_count = 0;
 				for (uint32_t j = 0; j < impl_nwa->count; j++) {
+					/* Determined BEFORE substituting -- see the doc comment on
+					 * zend_leaf_type_param_substitution_allocates. Each
+					 * substituted entry can independently allocate a fresh
+					 * canonical name (zend_generic_canonical_class_name),
+					 * which nothing else here retains a reference to once
+					 * this array's own buffer is freed below. */
+					sub_allocates[j] = zend_leaf_type_param_substitution_allocates(
+						impl_nwa->args[j], bound_args, bound_arity, ZEND_GENERIC_ORIGIN_CLASS_LIKE);
 					sub_args[j] = zend_substitute_leaf_type_param(
 						impl_nwa->args[j], bound_args, bound_arity);
+					substituted_count = j + 1;
 					if (zend_type_contains_type_parameter(sub_args[j])) {
 						all_ground = false;
 						break;
 					}
 				}
 				if (!all_ground) {
+					for (uint32_t j = 0; j < substituted_count; j++) {
+						if (sub_allocates[j]) {
+							zend_type_release(sub_args[j], /* persistent */ false);
+						}
+					}
+					free_alloca(sub_allocates, sub_alloc_use_heap);
 					free_alloca(sub_args, sub_use_heap);
 					continue;
 				}
@@ -7662,6 +7681,12 @@ ZEND_API zend_class_entry *zend_synthesize_monomorph(
 					iface_mono = zend_synthesize_monomorph(
 						iface_base, sub_args, impl_nwa->count);
 				}
+				for (uint32_t j = 0; j < impl_nwa->count; j++) {
+					if (sub_allocates[j]) {
+						zend_type_release(sub_args[j], /* persistent */ false);
+					}
+				}
+				free_alloca(sub_allocates, sub_alloc_use_heap);
 				free_alloca(sub_args, sub_use_heap);
 				if (!iface_mono) continue;
 

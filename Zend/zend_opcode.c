@@ -338,6 +338,18 @@ static uint32_t zend_type_arg_table_generation_counter = 1;
 
 ZEND_API zend_type_arg_table *zend_type_arg_table_alloc(uint32_t count) {
 	zend_type_arg_table *table = emalloc(ZEND_TYPE_ARG_TABLE_SIZE(count));
+	/* Zero the whole allocation before the explicit field assignments below:
+	 * the struct has an unavoidable padding gap between `shm` (bool) and the
+	 * pointer-aligned `entries[0]`, and each entry's `owned_type` (a
+	 * zend_type) has its own internal padding (see zend_types.h) that a
+	 * plain ZEND_TYPE_INIT_NONE(0) assignment doesn't zero either -- neither
+	 * gap is ever touched by field assignment, so without this the bytes
+	 * stay whatever emalloc's underlying heap block last held. Harmless at
+	 * runtime (never read back), but this table's contents get memcpy'd
+	 * verbatim into the opcache file-cache buffer when a monomorph's
+	 * generic_type_args is persisted, carrying the garbage into a
+	 * valgrind-visible writev() of otherwise-zeroed memory. */
+	memset(table, 0, ZEND_TYPE_ARG_TABLE_SIZE(count));
 #ifdef ZEND_GENERICS_STATS
 	EG(generics_type_arg_tables)++;
 #endif

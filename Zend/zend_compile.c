@@ -5305,6 +5305,14 @@ static void zend_emit_return_type_check(
 void zend_emit_final_return(bool return_one) /* {{{ */
 {
 	znode zn;
+	/* zn.u.constant (a zval) has its own internal padding that ZVAL_LONG/
+	 * ZVAL_NULL below don't fully touch; zend_emit_op copies this znode's
+	 * contents verbatim into the opcode's literal table, carrying whatever
+	 * garbage `zn`'s stack slot last held into the persisted script data
+	 * (surfaces as a valgrind "uninitialised byte" writev() warning when the
+	 * script is opcache file-cached). Zero it up front so nothing is left
+	 * unset regardless of which branch below runs. */
+	memset(&zn, 0, sizeof(zn));
 	zend_op *ret;
 	bool returns_reference = (CG(active_op_array)->fn_flags & ZEND_ACC_RETURN_REFERENCE) != 0;
 

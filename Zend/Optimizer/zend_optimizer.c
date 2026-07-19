@@ -1073,7 +1073,14 @@ zend_function *zend_optimizer_get_called_func(
 					if (src && src->opcode == ZEND_NEW) {
 						const zend_class_entry *ce = zend_optimizer_get_class_entry_from_op1(
 							script, op_array, src);
-						if (ce && ce->type == ZEND_USER_CLASS) {
+						if (ce && ce->type == ZEND_USER_CLASS
+								&& ce->default_object_handlers->get_method == zend_std_get_method) {
+							/* A custom get_method handler (e.g. SPL's
+							 * RecursiveIteratorIterator) may run validation or
+							 * redirect resolution entirely; a plain
+							 * function_table lookup here would silently skip
+							 * that behavior if we let the caller treat this as
+							 * a fully resolved, inlinable call. */
 							zend_string *method_name = Z_STR_P(CRT_CONSTANT(opline->op2) + 1);
 							zend_function *fbc = zend_hash_find_ptr(&ce->function_table, method_name);
 							if (fbc) {

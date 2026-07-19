@@ -1755,6 +1755,17 @@ fcall_by_name_end:
 		zend_vm_stack_free_args(call);
 
 		uint32_t call_info = ZEND_CALL_INFO(call);
+		/* This handler is normally paired with call sites (INIT_FCALL_BY_NAME
+		 * and friends) that never set RELEASE_THIS -- but the generics/
+		 * deprecated-call-op optimizer pass (zend_get_call_op, driven by
+		 * zend_optimizer_get_called_func's CV-based method resolution) can
+		 * retarget a CV-based method call's DO_FCALL to this opcode once the
+		 * callee is known to be #[Deprecated]/#[NoDiscard], while
+		 * ZEND_INIT_METHOD_CALL still sets RELEASE_THIS for that CV. Release
+		 * it here too, before the frame goes away, or the object leaks. */
+		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+			OBJ_RELEASE(Z_OBJ(call->This));
+		}
 		if (UNEXPECTED(call_info & (ZEND_CALL_HAS_EXTRA_NAMED_PARAMS|ZEND_CALL_ALLOCATED))) {
 			if (call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
 				zend_free_extra_named_params(call->extra_named_params);
@@ -1892,6 +1903,17 @@ fcall_by_name_end:
 		zend_vm_stack_free_args(call);
 
 		uint32_t call_info = ZEND_CALL_INFO(call);
+		/* This handler is normally paired with call sites (INIT_FCALL_BY_NAME
+		 * and friends) that never set RELEASE_THIS -- but the generics/
+		 * deprecated-call-op optimizer pass (zend_get_call_op, driven by
+		 * zend_optimizer_get_called_func's CV-based method resolution) can
+		 * retarget a CV-based method call's DO_FCALL to this opcode once the
+		 * callee is known to be #[Deprecated]/#[NoDiscard], while
+		 * ZEND_INIT_METHOD_CALL still sets RELEASE_THIS for that CV. Release
+		 * it here too, before the frame goes away, or the object leaks. */
+		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+			OBJ_RELEASE(Z_OBJ(call->This));
+		}
 		if (UNEXPECTED(call_info & (ZEND_CALL_HAS_EXTRA_NAMED_PARAMS|ZEND_CALL_ALLOCATED))) {
 			if (call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
 				zend_free_extra_named_params(call->extra_named_params);
@@ -2027,6 +2049,17 @@ fcall_by_name_end:
 		zend_vm_stack_free_args(call);
 
 		uint32_t call_info = ZEND_CALL_INFO(call);
+		/* This handler is normally paired with call sites (INIT_FCALL_BY_NAME
+		 * and friends) that never set RELEASE_THIS -- but the generics/
+		 * deprecated-call-op optimizer pass (zend_get_call_op, driven by
+		 * zend_optimizer_get_called_func's CV-based method resolution) can
+		 * retarget a CV-based method call's DO_FCALL to this opcode once the
+		 * callee is known to be #[Deprecated]/#[NoDiscard], while
+		 * ZEND_INIT_METHOD_CALL still sets RELEASE_THIS for that CV. Release
+		 * it here too, before the frame goes away, or the object leaks. */
+		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+			OBJ_RELEASE(Z_OBJ(call->This));
+		}
 		if (UNEXPECTED(call_info & (ZEND_CALL_HAS_EXTRA_NAMED_PARAMS|ZEND_CALL_ALLOCATED))) {
 			if (call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
 				zend_free_extra_named_params(call->extra_named_params);
@@ -55972,6 +56005,17 @@ fcall_by_name_end:
 		zend_vm_stack_free_args(call);
 
 		uint32_t call_info = ZEND_CALL_INFO(call);
+		/* This handler is normally paired with call sites (INIT_FCALL_BY_NAME
+		 * and friends) that never set RELEASE_THIS -- but the generics/
+		 * deprecated-call-op optimizer pass (zend_get_call_op, driven by
+		 * zend_optimizer_get_called_func's CV-based method resolution) can
+		 * retarget a CV-based method call's DO_FCALL to this opcode once the
+		 * callee is known to be #[Deprecated]/#[NoDiscard], while
+		 * ZEND_INIT_METHOD_CALL still sets RELEASE_THIS for that CV. Release
+		 * it here too, before the frame goes away, or the object leaks. */
+		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+			OBJ_RELEASE(Z_OBJ(call->This));
+		}
 		if (UNEXPECTED(call_info & (ZEND_CALL_HAS_EXTRA_NAMED_PARAMS|ZEND_CALL_ALLOCATED))) {
 			if (call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
 				zend_free_extra_named_params(call->extra_named_params);
@@ -56109,6 +56153,17 @@ fcall_by_name_end:
 		zend_vm_stack_free_args(call);
 
 		uint32_t call_info = ZEND_CALL_INFO(call);
+		/* This handler is normally paired with call sites (INIT_FCALL_BY_NAME
+		 * and friends) that never set RELEASE_THIS -- but the generics/
+		 * deprecated-call-op optimizer pass (zend_get_call_op, driven by
+		 * zend_optimizer_get_called_func's CV-based method resolution) can
+		 * retarget a CV-based method call's DO_FCALL to this opcode once the
+		 * callee is known to be #[Deprecated]/#[NoDiscard], while
+		 * ZEND_INIT_METHOD_CALL still sets RELEASE_THIS for that CV. Release
+		 * it here too, before the frame goes away, or the object leaks. */
+		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+			OBJ_RELEASE(Z_OBJ(call->This));
+		}
 		if (UNEXPECTED(call_info & (ZEND_CALL_HAS_EXTRA_NAMED_PARAMS|ZEND_CALL_ALLOCATED))) {
 			if (call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
 				zend_free_extra_named_params(call->extra_named_params);
@@ -56244,6 +56299,17 @@ fcall_by_name_end:
 		zend_vm_stack_free_args(call);
 
 		uint32_t call_info = ZEND_CALL_INFO(call);
+		/* This handler is normally paired with call sites (INIT_FCALL_BY_NAME
+		 * and friends) that never set RELEASE_THIS -- but the generics/
+		 * deprecated-call-op optimizer pass (zend_get_call_op, driven by
+		 * zend_optimizer_get_called_func's CV-based method resolution) can
+		 * retarget a CV-based method call's DO_FCALL to this opcode once the
+		 * callee is known to be #[Deprecated]/#[NoDiscard], while
+		 * ZEND_INIT_METHOD_CALL still sets RELEASE_THIS for that CV. Release
+		 * it here too, before the frame goes away, or the object leaks. */
+		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+			OBJ_RELEASE(Z_OBJ(call->This));
+		}
 		if (UNEXPECTED(call_info & (ZEND_CALL_HAS_EXTRA_NAMED_PARAMS|ZEND_CALL_ALLOCATED))) {
 			if (call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
 				zend_free_extra_named_params(call->extra_named_params);
