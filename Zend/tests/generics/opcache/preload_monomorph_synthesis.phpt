@@ -38,6 +38,16 @@ var_dump(identity::<int>(7));
 // A preloaded bounded/interface template monomorphizes too.
 $h = new Holder::<DateTime>(new DateTime());
 var_dump($h::class);
+
+// A generic child inheriting a T-free method from a generic parent (both
+// preloaded together) must not have crashed opcache preload startup, and
+// the inherited (shared, un-cloned) method must still work correctly on a
+// runtime-synthesized child monomorph.
+$c = new GenericChild();
+$c->add(1);
+$c->add(2);
+var_dump($c->count());
+var_dump($c->isEmpty());
 ?>
 --EXPECT--
 string(8) "Box<int>"
@@ -50,3 +60,5 @@ bool(false)
 string(8) "DateTime"
 int(7)
 string(16) "Holder<DateTime>"
+int(2)
+bool(false)

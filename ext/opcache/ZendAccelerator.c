@@ -4599,6 +4599,35 @@ static void preload_register_trait_methods(const zend_class_entry *ce) {
 	zend_op_array *op_array;
 
 	ZEND_HASH_MAP_FOREACH_PTR(&ce->function_table, op_array) {
+		/* A real trait can only ever contain user-defined methods, so the
+		 * original (trait-only) caller never needed this check. Widened to
+		 * also cover generic template classes (see the call site comment) --
+		 * but unlike a trait, a generic class can inherit an internal-
+		 * function entry (e.g. from an interface with a default/internal
+		 * implementation), which isn't a zend_op_array at all; treating it
+		 * as one and reading past its (smaller) allocation is what the
+		 * assertion below was actually catching. `type` is the common
+		 * leading field of zend_function, safe to read on any variant. */
+		if (op_array->type != ZEND_USER_FUNCTION) {
+			continue;
+		}
+		/* A real trait's function_table only ever holds methods it declares
+		 * itself, so the original (trait-only) caller never needed an
+		 * ownership check here. Widened to also cover generic template
+		 * classes -- but a class (unlike a trait) inherits shared, un-cloned
+		 * method entries from its generic ancestors too (see the verified
+		 * "T-free methods aren't cloned" behavior in
+		 * zend_maybe_substitute_inherited_method): such an inherited entry
+		 * is the SAME op_array/refcount as the declaring ancestor's own
+		 * entry, so scanning both classes' function_tables would register
+		 * that refcount pointer twice, and zend_hash_index_add_new_ptr
+		 * (an add-new, not an upsert) asserts the key is unique. Only
+		 * register a method from the class that actually declares it; the
+		 * inherited copy is registered once, when its declaring class is
+		 * itself visited by this same loop. */
+		if (op_array->scope != ce) {
+			continue;
+		}
 		if (!(op_array->fn_flags & ZEND_ACC_TRAIT_CLONE)) {
 			ZEND_ASSERT(op_array->refcount && "Must have refcount pointer");
 			zend_shared_alloc_register_xlat_entry(op_array->refcount, op_array);
@@ -4611,7 +4640,9 @@ static void preload_register_trait_methods(const zend_class_entry *ce) {
 				for (uint32_t i = 0; i < ZEND_PROPERTY_HOOK_COUNT; i++) {
 					if (info->hooks[i]) {
 						op_array = &info->hooks[i]->op_array;
-						if (!(op_array->fn_flags & ZEND_ACC_TRAIT_CLONE)) {
+						if (op_array->type == ZEND_USER_FUNCTION
+								&& op_array->scope == ce
+								&& !(op_array->fn_flags & ZEND_ACC_TRAIT_CLONE)) {
 							ZEND_ASSERT(op_array->refcount && "Must have refcount pointer");
 							zend_shared_alloc_register_xlat_entry(op_array->refcount, op_array);
 						}
