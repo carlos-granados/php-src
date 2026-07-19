@@ -96,6 +96,13 @@ ZEND_API zend_class_entry *zend_get_defaults_monomorph(zend_class_entry *base);
 ZEND_API zend_class_entry *zend_resolve_lexical_self_monomorph(
 	zend_class_entry *lexical, const zend_execute_data *ex);
 
+/* Releases every entry cached in EG(subst_arg_info_cache) (see the field
+ * comment in Zend/zend_globals.h) and destroys the table. Must run before
+ * the request ends, since the arg_info blocks it holds are shared and
+ * individually un-owned (see zend_maybe_substitute_inherited_method). Called
+ * from shutdown_executor(). */
+ZEND_API void zend_release_subst_arg_info_cache(void);
+
 /* True when the name has monomorph-canonical shape (contains `<`). The canonical
  * encoding for synthesized monomorphs embeds `<...>` in the class name, which is
  * invalid in any user-declared class. Use these helpers rather than open-coding

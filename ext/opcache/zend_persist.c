@@ -1391,23 +1391,43 @@ static void zend_persist_monomorph_op_array_body(zend_op_array *op_array)
 			arg_info--;
 		}
 		if (!zend_accel_in_shm(arg_info)) {
-			/* Substituted arg_info (arena, with copy_ctor'd types). */
-			uint32_t num_args = op_array->num_args;
-			if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
-				num_args++;
-			}
-			if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
-				num_args++;
-			}
-			arg_info = zend_shared_memdup_put(arg_info, sizeof(zend_arg_info) * num_args);
-			for (uint32_t i = 0; i < num_args; i++) {
-				if (arg_info[i].name) {
-					zend_accel_store_interned_string(arg_info[i].name);
+			/* Substituted arg_info (arena, with copy_ctor'd types). A
+			 * SHARED (EG(subst_arg_info_cache)-deduped, see
+			 * Zend/zend_globals.h) block may be the arg_info source for
+			 * MULTIPLE unrelated op_arrays/methods being persisted in this
+			 * same pass -- check the xlat table (the exact table and key
+			 * scheme zend_shared_memdup_put's own set_xlat=true registers
+			 * into) before persisting: a hit means an earlier op_array in
+			 * this pass already persisted this exact source pointer, so
+			 * reuse its SHM copy directly. Without this check, a second
+			 * persist of the same source pointer would both duplicate work
+			 * AND crash: zend_shared_memdup_put's internal xlat registration
+			 * is add-new (asserts the key doesn't already exist), and
+			 * re-running zend_persist_type on an already-persisted (already
+			 * in-SHM) type is not itself safe to repeat. */
+			zend_arg_info *persisted = zend_shared_alloc_get_xlat_entry(arg_info);
+			if (persisted) {
+				arg_info = persisted;
+			} else {
+				uint32_t num_args = op_array->num_args;
+				if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+					num_args++;
 				}
-				zend_persist_type(&arg_info[i].type);
-				if (arg_info[i].doc_comment) {
-					zend_accel_store_interned_string(arg_info[i].doc_comment);
+				if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+					num_args++;
 				}
+				zend_arg_info *source = arg_info;
+				arg_info = zend_shared_memdup_put(arg_info, sizeof(zend_arg_info) * num_args);
+				for (uint32_t i = 0; i < num_args; i++) {
+					if (arg_info[i].name) {
+						zend_accel_store_interned_string(arg_info[i].name);
+					}
+					zend_persist_type(&arg_info[i].type);
+					if (arg_info[i].doc_comment) {
+						zend_accel_store_interned_string(arg_info[i].doc_comment);
+					}
+				}
+				ZEND_ASSERT(zend_shared_alloc_get_xlat_entry(source) == arg_info);
 			}
 			if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
 				arg_info++;

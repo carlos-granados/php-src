@@ -3328,7 +3328,7 @@ static bool zend_jit_op_array_is_generic_shared(const zend_op_array *op_array)
 	if (op_array->fn_flags2 & ZEND_ACC2_MONOMORPH_TYPE_ARGS) {
 		return true;
 	}
-	if (op_array->fn_flags2 & ZEND_ACC2_GENERIC_ARGINFO_CLONE) {
+	if (op_array->fn_flags2 & ZEND_ACC2_GENERIC_ARGINFO_ANY_CLONE) {
 		/* A substituted class-method clone (e.g. Collection<User>::add(T
 		 * $item) -> add(User $item)) normally shares the template's opcode
 		 * buffer with every OTHER monomorph's own differently-substituted

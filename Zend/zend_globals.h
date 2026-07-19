@@ -260,6 +260,29 @@ struct _zend_executor_globals {
 	void *immutable_defaults_cache_tables[ZEND_IMMUTABLE_DEFAULTS_CACHE_MAX];
 	uint32_t immutable_defaults_cache_tables_count;
 
+	/* Dedup cache for substituted method arg_info blocks (see
+	 * zend_substitute_trait_method_arg_info / zend_maybe_substitute_inherited_method,
+	 * Zend/zend_inheritance.c). Two structurally-unrelated class templates
+	 * that both implement the same generic contract (e.g. two different
+	 * Collection<TKey, T> implementations) and get monomorphized with the
+	 * same binding produce byte-identical substituted arg_info content for
+	 * matching method shapes (measured: a real 2-template/6-method slice
+	 * collapsed 48 substitution events to 8 distinct shapes). Keyed by a
+	 * content-complete string encoding (type shape + arg name + default +
+	 * doc comment, per slot), so key equality IS the correctness guarantee
+	 * -- no separate verify step needed. Scoped to the class-inheritance
+	 * path only (not trait-use method import), and only to slots whose
+	 * substituted type is a plain scalar mask or single class name (no
+	 * unions/intersections/NAMED_WITH_ARGS -- see
+	 * zend_subst_arg_info_cache_key). Values are cache-owned: once a block
+	 * enters this table, no individual consuming function releases its
+	 * content on its own destroy (ZEND_ACC2_GENERIC_ARGINFO_CLONE is
+	 * withheld for cache-owned blocks); shutdown_executor() releases every
+	 * unique block exactly once instead. Per-request only (values are
+	 * arena-allocated, tied to this request's CG(arena)) -- not persisted
+	 * across requests or into opcache SHM. */
+	HashTable subst_arg_info_cache;
+
 #ifdef ZEND_GENERICS_STATS
 	/* Process-lifetime reified-generics counters, exposed to userland via the
 	 * zend_test debug function zend_test_generics_stats(). Cumulative from

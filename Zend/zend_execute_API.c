@@ -204,6 +204,12 @@ void init_executor(void) /* {{{ */
 
 	zend_hash_init(&EG(callable_convert_cache), 8, NULL, ZVAL_PTR_DTOR, 0);
 
+	/* Values are raw pointers to arena-allocated wrapper structs (see
+	 * zend_subst_arg_info_cache_entry in zend_inheritance.c) -- nothing for
+	 * a value dtor to release; the keys' own zend_strings are released by
+	 * zend_hash_destroy regardless of the value dtor. */
+	zend_hash_init(&EG(subst_arg_info_cache), 8, NULL, NULL, 0);
+
 	EG(active) = 1;
 }
 /* }}} */
@@ -470,6 +476,13 @@ void shutdown_executor(void) /* {{{ */
 	 * zend_globals.h). Cheap in the common case -- typically 0 or a
 	 * handful of entries. */
 	zend_release_immutable_defaults_cache_tables();
+
+	/* Must also run before the request ends: EG(subst_arg_info_cache)'s
+	 * arg_info blocks may be shared across multiple, otherwise-unrelated
+	 * functions (see the field comment in zend_globals.h and
+	 * zend_maybe_substitute_inherited_method in zend_inheritance.c), so no
+	 * single consuming function's own teardown releases them. */
+	zend_release_subst_arg_info_cache();
 
 	zend_try {
 		zend_stream_shutdown();

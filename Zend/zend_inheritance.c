@@ -46,10 +46,11 @@ static void zend_check_generic_link_arity(
 static void zend_check_generic_link_bounds(
 		zend_class_entry *target_ce, const zend_type *args_box,
 		const char *clause, zend_class_entry *ce);
-static void zend_substitute_trait_method_arg_info(
+static bool zend_substitute_trait_method_arg_info(
 		zend_function *new_fn, const zend_function *orig_fn,
 		const zend_class_entry *using_ce,
-		const zend_type *bind_args, uint32_t bind_arity);
+		const zend_type *bind_args, uint32_t bind_arity,
+		bool try_dedup_cache);
 static zend_arg_info *zend_clone_arg_info_block(
 		const zend_arg_info *orig_block, uint32_t total);
 static bool zend_diamond_types_equal(zend_type a, zend_type b);
@@ -2307,7 +2308,8 @@ static zend_function *zend_maybe_substitute_inherited_method(
 	memcpy(clone, parent_fn, sizeof(zend_op_array));
 	clone->op_array.fn_flags &= ~ZEND_ACC_IMMUTABLE;
 
-	zend_substitute_trait_method_arg_info(clone, parent_fn, ce, bound_args, bound_arity);
+	bool cache_owned = zend_substitute_trait_method_arg_info(
+		clone, parent_fn, ce, bound_args, bound_arity, /* try_dedup_cache */ true);
 	free_alloca(bound_args, use_heap);
 	if (clone->op_array.arg_info == parent_fn->op_array.arg_info) {
 		return NULL;
@@ -2320,9 +2322,17 @@ static zend_function *zend_maybe_substitute_inherited_method(
 	 * tells teardown that this private arg_info block (arena-allocated, with
 	 * addref'd names and copy_ctor'd types) must have its contents released
 	 * even though the shared body's refcount keeps destroy_op_array from
-	 * reaching its normal arg_info release. */
+	 * reaching its normal arg_info release -- UNLESS the block is cache-owned
+	 * (possibly shared with other, unrelated functions via
+	 * EG(subst_arg_info_cache)), in which case this clone must NOT release it
+	 * individually; zend_release_subst_arg_info_cache() does that once at
+	 * request shutdown instead. */
 	clone->common.fn_flags |= ZEND_ACC_TRAIT_CLONE;
-	clone->common.fn_flags2 |= ZEND_ACC2_GENERIC_ARGINFO_CLONE;
+	if (cache_owned) {
+		clone->common.fn_flags2 |= ZEND_ACC2_GENERIC_ARGINFO_SHARED;
+	} else {
+		clone->common.fn_flags2 |= ZEND_ACC2_GENERIC_ARGINFO_CLONE;
+	}
 
 	function_add_ref(clone);
 	return clone;
@@ -4108,19 +4118,135 @@ static zend_type zend_erase_using_class_t_ref(
 	return erased;
 }
 
-static void zend_substitute_trait_method_arg_info(
+/* Value stored in EG(subst_arg_info_cache) -- see the field comment in
+ * Zend/zend_globals.h. `total` is recorded alongside `block` because
+ * release (zend_release_generic_arginfo_block_content) needs to know how
+ * many slots to walk, and that isn't otherwise recoverable from `block`
+ * alone. Arena-allocated: lives exactly as long as `block` itself. */
+typedef struct _zend_subst_arg_info_cache_entry {
+	zend_arg_info *block;
+	uint32_t total;
+} zend_subst_arg_info_cache_entry;
+
+/* Releases the owned content of every slot in `block` -- addref'd name /
+ * doc_comment strings and the copy_ctor'd type -- the exact inverse of what
+ * zend_clone_arg_info_block plus the substitution loop below construct.
+ * Does NOT free `block` itself: it's arena-allocated, reclaimed in bulk with
+ * the rest of CG(arena) at request end, never individually. Two callers:
+ * discarding a freshly-built block made redundant by a dedup-cache hit, and
+ * zend_release_subst_arg_info_cache's one-time-per-entry release at request
+ * shutdown. */
+static void zend_release_generic_arginfo_block_content(zend_arg_info *block, uint32_t total)
+{
+	for (uint32_t i = 0; i < total; i++) {
+		if (block[i].name) {
+			zend_string_release(block[i].name);
+		}
+		if (block[i].doc_comment) {
+			zend_string_release(block[i].doc_comment);
+		}
+		zend_type_release(block[i].type, /* persistent */ false);
+	}
+}
+
+/* Content-complete cache key for a substituted arg_info block: encodes
+ * everything zend_clone_arg_info_block copies or the substitution loop
+ * overwrites per slot (type shape, arg name, default value, doc comment),
+ * so key equality IS content equality -- no separate verify step is needed
+ * after a hash lookup, and two different contents cannot collide onto the
+ * same key (every string field is length-prefixed before its bytes).
+ * Returns NULL (uncacheable) if any slot's substituted type is a
+ * union/intersection/NAMED_WITH_ARGS composite: safely canonicalizing
+ * arbitrary nesting isn't needed for the measured dedup opportunity (every
+ * observed duplicate was a plain scalar mask or single class name), and an
+ * incomplete encoding there would risk silently conflating different
+ * shapes. */
+static zend_string *zend_subst_arg_info_cache_key(
+		const zend_arg_info *block, uint32_t total, bool has_return)
+{
+	smart_str buf = {0};
+	smart_str_append_long(&buf, (zend_long) total);
+	smart_str_appendc(&buf, has_return ? 'R' : 'r');
+	for (uint32_t i = 0; i < total; i++) {
+		zend_type t = block[i].type;
+		if (ZEND_TYPE_HAS_LIST(t) || ZEND_TYPE_HAS_NAMED_WITH_ARGS(t)) {
+			smart_str_free(&buf);
+			return NULL;
+		}
+		smart_str_appendc(&buf, '|');
+		smart_str_append_long(&buf, (zend_long) ZEND_TYPE_FULL_MASK(t));
+		smart_str_appendc(&buf, ':');
+		if (ZEND_TYPE_HAS_NAME(t)) {
+			zend_string *n = ZEND_TYPE_NAME(t);
+			smart_str_appendc(&buf, 'C');
+			smart_str_append_long(&buf, (zend_long) ZSTR_LEN(n));
+			smart_str_appendc(&buf, ':');
+			smart_str_append(&buf, n);
+		} else {
+			smart_str_appendc(&buf, '-');
+		}
+		smart_str_appendc(&buf, ':');
+		if (block[i].name) {
+			smart_str_appendc(&buf, 'N');
+			smart_str_append_long(&buf, (zend_long) ZSTR_LEN(block[i].name));
+			smart_str_appendc(&buf, ':');
+			smart_str_append(&buf, block[i].name);
+		} else {
+			smart_str_appendc(&buf, '-');
+		}
+		smart_str_appendc(&buf, ':');
+		/* zend_compile_params never initializes the return slot's (i == 0
+		 * when has_return) default_value field -- it's semantically
+		 * meaningless there (a return type has no "default"), and nothing
+		 * before this cache ever read it. Reading it here for that slot
+		 * would dereference uninitialized memory (caught by valgrind:
+		 * segfault at this exact line before this guard was added). */
+		if (!(has_return && i == 0) && block[i].default_value) {
+			smart_str_appendc(&buf, 'D');
+			smart_str_append_long(&buf, (zend_long) ZSTR_LEN(block[i].default_value));
+			smart_str_appendc(&buf, ':');
+			smart_str_append(&buf, block[i].default_value);
+		} else {
+			smart_str_appendc(&buf, '-');
+		}
+		smart_str_appendc(&buf, ':');
+		if (block[i].doc_comment) {
+			smart_str_appendc(&buf, 'K');
+			smart_str_append_long(&buf, (zend_long) ZSTR_LEN(block[i].doc_comment));
+			smart_str_appendc(&buf, ':');
+			smart_str_append(&buf, block[i].doc_comment);
+		} else {
+			smart_str_appendc(&buf, '-');
+		}
+		smart_str_appendc(&buf, ';');
+	}
+	smart_str_0(&buf);
+	return buf.s;
+}
+
+ZEND_API void zend_release_subst_arg_info_cache(void)
+{
+	zend_subst_arg_info_cache_entry *entry;
+	ZEND_HASH_MAP_FOREACH_PTR(&EG(subst_arg_info_cache), entry) {
+		zend_release_generic_arginfo_block_content(entry->block, entry->total);
+	} ZEND_HASH_FOREACH_END();
+	zend_hash_destroy(&EG(subst_arg_info_cache));
+}
+
+static bool zend_substitute_trait_method_arg_info(
 		zend_function *new_fn, const zend_function *orig_fn,
 		const zend_class_entry *using_ce,
-		const zend_type *bind_args, uint32_t bind_arity)
+		const zend_type *bind_args, uint32_t bind_arity,
+		bool try_dedup_cache)
 {
-	if (orig_fn->type != ZEND_USER_FUNCTION) return;
+	if (orig_fn->type != ZEND_USER_FUNCTION) return false;
 	const zend_op_array *orig_op = &orig_fn->op_array;
 	if (!orig_op->generic_types) {
-		return;
+		return false;
 	}
 
 	if (!orig_op->generic_types->parameters && !orig_op->generic_types->return_type) {
-		return;
+		return false;
 	}
 
 	uint32_t num_args = orig_op->num_args;
@@ -4128,7 +4254,7 @@ static void zend_substitute_trait_method_arg_info(
 	bool has_return = (orig_op->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) != 0;
 	uint32_t total = num_args + (has_return ? 1 : 0);
 	if (total == 0) {
-		return;
+		return false;
 	}
 
 	const zend_arg_info *orig_block = has_return ? orig_op->arg_info - 1 : orig_op->arg_info;
@@ -4241,9 +4367,45 @@ static void zend_substitute_trait_method_arg_info(
 		} ZEND_HASH_FOREACH_END();
 	}
 
-	if (new_block) {
-		new_fn->op_array.arg_info = has_return ? new_block + 1 : new_block;
+	if (!new_block) {
+		return false;
 	}
+
+	if (try_dedup_cache) {
+		zend_string *key = zend_subst_arg_info_cache_key(new_block, total, has_return);
+		if (key) {
+			zend_subst_arg_info_cache_entry *found =
+				zend_hash_find_ptr(&EG(subst_arg_info_cache), key);
+			if (found) {
+				/* This block is a redundant duplicate of one already cached
+				 * (from this or an earlier, unrelated template) -- release
+				 * its owned content (the cache's copy already owns an
+				 * equivalent one) and use the cached block instead. The
+				 * zend_arg_info array itself needs no explicit free: it's
+				 * arena-allocated, reclaimed in bulk with the rest of
+				 * CG(arena) at request end. */
+				zend_release_generic_arginfo_block_content(new_block, total);
+				new_block = found->block;
+			} else {
+				zend_subst_arg_info_cache_entry *entry =
+					zend_arena_alloc(&CG(arena), sizeof(zend_subst_arg_info_cache_entry));
+				entry->block = new_block;
+				entry->total = total;
+				zend_hash_add_ptr(&EG(subst_arg_info_cache), key, entry);
+			}
+			zend_string_release(key);
+			new_fn->op_array.arg_info = has_return ? new_block + 1 : new_block;
+			/* Cache-owned: the caller must NOT flag this clone for
+			 * individual arg_info release (ZEND_ACC2_GENERIC_ARGINFO_CLONE)
+			 * -- this block may now be shared with other functions, and
+			 * zend_release_subst_arg_info_cache() releases it exactly once
+			 * at request shutdown instead. */
+			return true;
+		}
+	}
+
+	new_fn->op_array.arg_info = has_return ? new_block + 1 : new_block;
+	return false;
 }
 
 static const zend_type_named_with_args *zend_get_trait_use_binding_by_index(
@@ -4474,7 +4636,12 @@ static void zend_add_trait_method(zend_class_entry *ce, zend_string *name, zend_
 		}
 
 		if (bind_args) {
-			zend_substitute_trait_method_arg_info(new_fn, fn, ce, bind_args, bind_arity);
+			/* try_dedup_cache = false: this path's ownership handling
+			 * (whether/how a substituted block's contents get released) is
+			 * a separate, pre-existing concern from the class-inheritance
+			 * path above and isn't touched here -- see the dedup cache's
+			 * field comment in zend_globals.h for why it's scoped out. */
+			zend_substitute_trait_method_arg_info(new_fn, fn, ce, bind_args, bind_arity, false);
 		}
 
 		free_alloca(default_args, use_heap);

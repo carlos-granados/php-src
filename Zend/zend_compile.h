@@ -688,6 +688,24 @@ typedef struct _zend_oparray_context {
 /* opcode buffer + tracing-JIT counters (idempotence      |     |     |     */
 /* marker for zend_synthesize_monomorph's post-link pass) |     |     |     */
 #define ZEND_ACC2_JIT_MONO_SETUP         (1 << 4)  /*     |  X  |     |     */
+/*                                                        |     |     |     */
+/* generic method clone's substituted arg_info block is   |     |     |     */
+/* SHARED (EG(subst_arg_info_cache) dedup, possibly with  |     |     |     */
+/* other unrelated functions) -- like GENERIC_ARGINFO_CLONE|     |     |     */
+/* the pointer must be detached before the normal arg_info|     |     |     */
+/* release below runs (it's arena-allocated, never efree'd|     |     |     */
+/* directly), but unlike that flag, this clone must NOT   |     |     |     */
+/* release the block's contents: the cache releases each  |     |     |     */
+/* unique block exactly once at request shutdown instead. */
+#define ZEND_ACC2_GENERIC_ARGINFO_SHARED (1 << 5)  /*     |  X  |     |     */
+
+/* Every consumer that only cares "does this op_array carry a substituted
+ * (non-template) arg_info block" -- JIT compile-skip checks, closure
+ * rebind's flag-clear, preload's trait-clone-restore skip -- should treat
+ * CLONE and SHARED identically: the CLONE/SHARED distinction only matters
+ * to destroy_op_array (who releases the content), never to these. */
+#define ZEND_ACC2_GENERIC_ARGINFO_ANY_CLONE \
+	(ZEND_ACC2_GENERIC_ARGINFO_CLONE | ZEND_ACC2_GENERIC_ARGINFO_SHARED)
 
 #define ZEND_ACC_PPP_MASK  (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE)
 #define ZEND_ACC_PPP_SET_MASK  (ZEND_ACC_PUBLIC_SET | ZEND_ACC_PROTECTED_SET | ZEND_ACC_PRIVATE_SET)

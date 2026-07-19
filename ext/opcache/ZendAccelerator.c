@@ -4659,7 +4659,7 @@ static void preload_fix_trait_op_array(zend_op_array *op_array)
 		return;
 	}
 
-	if (op_array->fn_flags2 & ZEND_ACC2_GENERIC_ARGINFO_CLONE) {
+	if (op_array->fn_flags2 & ZEND_ACC2_GENERIC_ARGINFO_ANY_CLONE) {
 		/* A generic monomorph method clone is marked ZEND_ACC_TRAIT_CLONE
 		 * to reuse trait-clone infrastructure elsewhere (opcache persistence,
 		 * the RECV slow path -- see zend_maybe_substitute_inherited_method),
@@ -4671,7 +4671,10 @@ static void preload_fix_trait_op_array(zend_op_array *op_array)
 		 * the entire reason the clone exists -- and the unconditional
 		 * `*op_array = *orig_op_array` below would blow it away, silently
 		 * reverting the clone to the template's erased (T-generic) checks.
-		 * Nothing here needs canonicalizing against the template. */
+		 * Nothing here needs canonicalizing against the template. Applies
+		 * equally to a SHARED (dedup-cached) block: it's still this
+		 * op_array's own substituted content at persist time, just not
+		 * individually released at request-teardown time. */
 		return;
 	}
 

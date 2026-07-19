@@ -8837,7 +8837,7 @@ static bool zend_jit_callee_may_be_swapped(const zend_function *func)
 	}
 	return func->op_array.generic_parameters
 		|| func->op_array.generic_types
-		|| (func->common.fn_flags2 & (ZEND_ACC2_MONOMORPH_TYPE_ARGS | ZEND_ACC2_GENERIC_ARGINFO_CLONE))
+		|| (func->common.fn_flags2 & (ZEND_ACC2_MONOMORPH_TYPE_ARGS | ZEND_ACC2_GENERIC_ARGINFO_ANY_CLONE))
 		|| (func->common.scope && func->common.scope->generic_parameters);
 }
 

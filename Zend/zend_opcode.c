@@ -1075,6 +1075,21 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 		op_array->arg_info = NULL;
 	}
 
+	/* A generic method clone whose substituted arg_info block is SHARED
+	 * (EG(subst_arg_info_cache) dedup -- possibly with other, unrelated
+	 * functions whose own teardown will run this same block too). Detach
+	 * the pointer for the same reason as the GENERIC_ARGINFO_CLONE case
+	 * above (it's arena-allocated, never efree'd directly by the
+	 * unconditional release further down) -- but do NOT release its
+	 * contents here: the cache releases each unique block exactly once at
+	 * request shutdown (zend_release_subst_arg_info_cache), regardless of
+	 * how many functions point at it or when each of their own teardowns
+	 * runs. Releasing here too would double-release the shared strings. */
+	if ((op_array->fn_flags2 & ZEND_ACC2_GENERIC_ARGINFO_SHARED)
+			&& !(op_array->fn_flags & ZEND_ACC_IMMUTABLE)) {
+		op_array->arg_info = NULL;
+	}
+
 	/* A runtime-synthesized function monomorph (by-name dispatch under opcache)
 	 * shares the base op-array body (refcount == NULL, so this function returns
 	 * just below without reaching the generic_types teardown at the end). It
