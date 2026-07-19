@@ -1050,47 +1050,56 @@ cleanup_args:
 	if (func->type == ZEND_USER_FUNCTION) {
 		uint32_t orig_jit_trace_num = EG(jit_trace_num);
 
-		/* C-dispatched calls (call_user_func, usort, array_map, etc.) don't go
-		 * through VERIFY_GENERIC_ARGUMENTS either, which is where generic
-		 * arity is normally enforced and declared defaults are installed. A C
-		 * dispatch can never supply turbofish, so a generic callee with
-		 * non-defaulted type parameters — and no captured bindings already on
-		 * the frame — must fail with the same ArgumentCountError a dynamic
-		 * VM call raises; otherwise install the defaults-built table. */
-		if (UNEXPECTED(func->op_array.generic_parameters != NULL)
-				&& call->type_args == NULL) {
-			zend_check_generic_call_arguments(func, 0, NULL, NULL);
-			if (EXPECTED(!EG(exception))) {
-				call->type_args = zend_build_generic_call_type_args(call, NULL);
-			} else {
-				zend_vm_stack_free_args(call);
-				if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-					OBJ_RELEASE(Z_OBJ(call->This));
+		/* Both blocks below are reified-generics bookkeeping that a normal
+		 * (non-generic, non-closure-with-captured-T) C-dispatched call never
+		 * needs. Share one outer guard so the overwhelmingly common case
+		 * (call_user_func/usort/array_map/... on ordinary code) pays a single
+		 * branch here instead of two. */
+		if (UNEXPECTED(func->op_array.generic_parameters != NULL || call->type_args != NULL)) {
+			/* C-dispatched calls (call_user_func, usort, array_map, etc.) don't
+			 * go through VERIFY_GENERIC_ARGUMENTS either, which is where
+			 * generic arity is normally enforced and declared defaults are
+			 * installed. A C dispatch can never supply turbofish, so a generic
+			 * callee with non-defaulted type parameters — and no captured
+			 * bindings already on the frame — must fail with the same
+			 * ArgumentCountError a dynamic VM call raises; otherwise install
+			 * the defaults-built table. */
+			if (UNEXPECTED(func->op_array.generic_parameters != NULL)
+					&& call->type_args == NULL) {
+				zend_check_generic_call_arguments(func, 0, NULL, NULL);
+				if (EXPECTED(!EG(exception))) {
+					call->type_args = zend_build_generic_call_type_args(call, NULL);
+				} else {
+					zend_vm_stack_free_args(call);
+					if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+						OBJ_RELEASE(Z_OBJ(call->This));
+					}
+					zend_vm_stack_free_call_frame(call);
+					EG(fake_scope) = orig_fake_scope;
+					zend_release_fcall_info_cache(fci_cache);
+					return SUCCESS;
 				}
-				zend_vm_stack_free_call_frame(call);
-				EG(fake_scope) = orig_fake_scope;
-				zend_release_fcall_info_cache(fci_cache);
-				return SUCCESS;
 			}
-		}
 
-		/* C-dispatched calls (usort, array_map, Closure::call, etc.) don't go
-		 * through DO_FCALL, so the closure-side reified arg check that lives
-		 * there is bypassed. Run it here for closures whose captured T-table
-		 * was propagated by zend_vm_init_call_frame. Must fire before
-		 * zend_init_func_execute_data, because that relocates variadic args
-		 * past the CV slots and the helper would then read UNDEF positions. */
-		if (UNEXPECTED(call->type_args
-				&& (func->common.fn_flags & ZEND_ACC_CLOSURE))) {
-			if (!zend_verify_generic_arg_types(call, NULL)) {
-				zend_vm_stack_free_args(call);
-				if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-					OBJ_RELEASE(Z_OBJ(call->This));
+			/* C-dispatched calls (usort, array_map, Closure::call, etc.) don't
+			 * go through DO_FCALL, so the closure-side reified arg check that
+			 * lives there is bypassed. Run it here for closures whose captured
+			 * T-table was propagated by zend_vm_init_call_frame. Must fire
+			 * before zend_init_func_execute_data, because that relocates
+			 * variadic args past the CV slots and the helper would then read
+			 * UNDEF positions. */
+			if (UNEXPECTED(call->type_args
+					&& (func->common.fn_flags & ZEND_ACC_CLOSURE))) {
+				if (!zend_verify_generic_arg_types(call, NULL)) {
+					zend_vm_stack_free_args(call);
+					if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+						OBJ_RELEASE(Z_OBJ(call->This));
+					}
+					zend_vm_stack_free_call_frame(call);
+					EG(fake_scope) = orig_fake_scope;
+					zend_release_fcall_info_cache(fci_cache);
+					return SUCCESS;
 				}
-				zend_vm_stack_free_call_frame(call);
-				EG(fake_scope) = orig_fake_scope;
-				zend_release_fcall_info_cache(fci_cache);
-				return SUCCESS;
 			}
 		}
 
