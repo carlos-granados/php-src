@@ -39,4 +39,17 @@ class GenericBase<T = mixed> {
 
 class GenericChild<T = mixed> extends GenericBase<T> {
     public function isEmpty(): bool { return $this->count() === 0; }
+
+    // Declares its OWN generic type parameter with a default, called below
+    // via a naked (non-turbofish) call, repeatedly, against a preloaded
+    // (immutable) instance -- exercises the naked-call defaults-cache-slot
+    // path in zend_verify_speculative_generic_call. That path used to be
+    // skipped entirely for immutable op_arrays (rebuilding a fresh
+    // zend_type_arg_table on every single call instead of memoizing one per
+    // request); once it stopped being skipped, the memoized table leaked
+    // every request, since destroy_op_array/destroy_zend_class never run
+    // for an immutable class -- see EG(immutable_defaults_cache_tables) in
+    // Zend/zend_globals.h for the fix. Debug builds' own leak detector
+    // catches a regression here automatically.
+    public function tag<U = mixed>(): string { return 'tag'; }
 }

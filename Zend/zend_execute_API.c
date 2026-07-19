@@ -433,6 +433,23 @@ ZEND_API void zend_shutdown_executor_values(bool fast_shutdown)
 	zend_objects_store_free_object_storage(&EG(objects_store), fast_shutdown);
 }
 
+/* Releases every zend_type_arg_table* stashed into an immutable op_array's
+ * naked-call defaults cache slot this request (see
+ * EG(immutable_defaults_cache_tables) in zend_globals.h and the registration
+ * site in zend_verify_speculative_generic_call, Zend/zend_compile.c). Each
+ * table was marked `persisted` purely to survive normal per-frame teardown
+ * while cached, not because it lives in opcache SHM -- clear that first so
+ * zend_type_arg_table_destroy's SHM guard doesn't also skip this release. */
+static void zend_release_immutable_defaults_cache_tables(void)
+{
+	for (uint32_t i = 0; i < EG(immutable_defaults_cache_tables_count); i++) {
+		zend_type_arg_table *t = (zend_type_arg_table *) EG(immutable_defaults_cache_tables)[i];
+		t->persisted = false;
+		zend_type_arg_table_destroy(t);
+	}
+	EG(immutable_defaults_cache_tables_count) = 0;
+}
+
 void shutdown_executor(void) /* {{{ */
 {
 #if ZEND_DEBUG
@@ -446,6 +463,13 @@ void shutdown_executor(void) /* {{{ */
 #else
 	bool fast_shutdown = is_zend_mm() && !EG(full_tables_cleanup);
 #endif
+
+	/* Must run before the request ends: the op_arrays these tables are
+	 * cached against are immutable/SHM and outlive the request, so nothing
+	 * else will ever release them (see the field comment in
+	 * zend_globals.h). Cheap in the common case -- typically 0 or a
+	 * handful of entries. */
+	zend_release_immutable_defaults_cache_tables();
 
 	zend_try {
 		zend_stream_shutdown();

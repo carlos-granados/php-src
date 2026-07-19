@@ -59,6 +59,9 @@ END_EXTERN_C()
 
 #define SYMTABLE_CACHE_SIZE 32
 
+/* See EG(immutable_defaults_cache_tables) below. */
+#define ZEND_IMMUTABLE_DEFAULTS_CACHE_MAX 64
+
 #ifdef ZEND_CHECK_STACK_LIMIT
 # define ZEND_MAX_ALLOWED_STACK_SIZE_UNCHECKED -1
 # define ZEND_MAX_ALLOWED_STACK_SIZE_DETECT     0
@@ -232,6 +235,30 @@ struct _zend_executor_globals {
 	 * Replaces a previous design that mutated base->ce_flags in place, which
 	 * would SIGSEGV when base lived in read-only opcache SHM. */
 	bool monomorph_synthesis_active;
+
+	/* zend_type_arg_table*s stashed into an immutable (opcache SHM /
+	 * preloaded) op_array's naked-call defaults cache slot this request (see
+	 * zend_verify_speculative_generic_call, Zend/zend_compile.c). Such an
+	 * op_array never reaches destroy_op_array/destroy_zend_class (it lives
+	 * in SHM, outliving the request), so the normal per-op_array reclaim
+	 * (zend_release_defaults_cache_slot) never fires for it -- these tables
+	 * are released explicitly at shutdown_executor() instead.
+	 *
+	 * Fixed-size, not a dynamically-grown structure: this is EG-inline
+	 * storage (part of the struct itself, no separate allocation), so
+	 * there's nothing for the debug build's per-request leak scanner to
+	 * flag -- a dynamically-grown backing array was tried first and,
+	 * despite being correctly freed every request, still triggered a
+	 * one-time false-positive leak report the first time it grew (any
+	 * persistent allocation looks the same as an unfreed request-scoped one
+	 * to that scanner). ZEND_IMMUTABLE_DEFAULTS_CACHE_MAX distinct
+	 * (immutable op_array, no-turbofish) call sites can be memoized per
+	 * request; beyond that, further sites silently fall back to the
+	 * pre-existing uncached-rebuild behavior for the rest of the request
+	 * (rare in practice -- would need more than that many distinct generic
+	 * methods called via this exact path in one request). */
+	void *immutable_defaults_cache_tables[ZEND_IMMUTABLE_DEFAULTS_CACHE_MAX];
+	uint32_t immutable_defaults_cache_tables_count;
 
 #ifdef ZEND_GENERICS_STATS
 	/* Process-lifetime reified-generics counters, exposed to userland via the

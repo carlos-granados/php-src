@@ -48,6 +48,13 @@ $c->add(1);
 $c->add(2);
 var_dump($c->count());
 var_dump($c->isEmpty());
+
+// Naked (non-turbofish) calls to GenericChild::tag<U = mixed>(), repeated,
+// against a preloaded (immutable) instance -- see the comment on tag() in
+// preload_generic.inc for what this guards against.
+var_dump($c->tag());
+var_dump($c->tag());
+var_dump($c->tag());
 ?>
 --EXPECT--
 string(8) "Box<int>"
@@ -62,3 +69,6 @@ int(7)
 string(16) "Holder<DateTime>"
 int(2)
 bool(false)
+string(3) "tag"
+string(3) "tag"
+string(3) "tag"
