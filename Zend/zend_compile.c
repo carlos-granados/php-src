@@ -38,6 +38,7 @@
 #include "zend_observer.h"
 #include "zend_call_stack.h"
 #include "zend_frameless_function.h"
+#include "zend_execute.h"
 #include "zend_property_hooks.h"
 
 #define SET_NODE(target, src) do { \
@@ -1838,8 +1839,45 @@ ZEND_API void zend_verify_speculative_generic_call(zend_execute_data *call)
 		 * site (closure with captured bindings, monomorph by-name dispatch)
 		 * keeps it -- rebuilding here would overwrite the captured bindings
 		 * with a defaults-only table. Mirrors the equivalent check in
-		 * ZEND_VERIFY_GENERIC_ARGUMENTS. */
-		zend_type_arg_table *t = zend_build_or_get_cached_type_args(call, NULL, NULL);
+		 * ZEND_VERIFY_GENERIC_ARGUMENTS.
+		 *
+		 * No dedicated opcode/cache_slot exists at THIS call site (see
+		 * zend_emit_verify_generic_arguments), but the resolved table is a
+		 * pure function of the CALLEE's declared defaults when eligible
+		 * (zend_call_unset_slots_site_invariant) -- i.e. invariant across
+		 * every naked call to this function, from any call site. Rather than
+		 * rebuilding on every single call, reuse a 2-slot cache reserved on
+		 * the callee's OWN run_time_cache at compile time (defaults_cache_slot),
+		 * so repeated naked calls to the same generic function memoize the
+		 * table exactly once per process. */
+		void **cache_slot = NULL;
+		if (ZEND_USER_CODE(call->func->common.type)
+				&& !(call->func->common.fn_flags & ZEND_ACC_IMMUTABLE)
+				&& call->func->op_array.generic_parameters
+				&& call->func->op_array.generic_parameters->defaults_cache_slot != (uint32_t) -1) {
+			/* A runtime monomorph method promoted into opcache's cross-
+			 * request SHM cache (zend_monomorph_cache_add) is genuinely
+			 * ZEND_ACC_IMMUTABLE -- intentionally, since it's meant to
+			 * outlive this request. Its run_time_cache is still a per-
+			 * process overlay, but that overlay's reclaim for immutable/SHM
+			 * op_arrays doesn't route through destroy_op_array the way it
+			 * does for ordinary per-request op_arrays (confirmed via
+			 * instrumentation: ce_flags read back ZEND_ACC_IMMUTABLE at
+			 * destroy time, so destroy_zend_class's early-return skips ever
+			 * reaching this op_array's cleanup). A heap-allocated
+			 * (emalloc'd) cache entry stashed there would leak every time.
+			 * Skip caching for immutable op_arrays entirely and fall back to
+			 * the original uncached rebuild -- correct, just not memoized,
+			 * for this narrower case; every other case (plain functions,
+			 * methods on not-yet-SHM-promoted classes) still benefits. */
+			zend_op_array *fop = &call->func->op_array;
+			if (!RUN_TIME_CACHE(fop)) {
+				zend_init_func_run_time_cache(fop);
+			}
+			cache_slot = (void **) ((char *) RUN_TIME_CACHE(fop)
+				+ fop->generic_parameters->defaults_cache_slot);
+		}
+		zend_type_arg_table *t = zend_build_or_get_cached_type_args(call, NULL, cache_slot);
 		if (t) {
 			call->type_args = t;
 		}
@@ -12097,6 +12135,14 @@ static zend_op_array *zend_compile_func_decl_ex(
 	if (generic_params_ast) {
 		op_array->generic_parameters = zend_compile_generic_type_parameter_list(generic_params_ast, ZEND_GENERIC_ORIGIN_FUNCTION_LIKE);
 		zend_generic_scope_push(op_array->generic_parameters, ZEND_GENERIC_ORIGIN_FUNCTION_LIKE);
+		/* Reserve a 2-slot cache (slot[0] = table, slot[1] = key) in THIS
+		 * function/method's own run_time_cache, used by a naked (non-
+		 * turbofish) call site elsewhere to memoize the all-defaults
+		 * type_arg_table instead of rebuilding it on every call -- see
+		 * zend_verify_speculative_generic_call. Reserved unconditionally for
+		 * every generic function/method (cheap: 16 bytes), regardless of
+		 * whether any caller ends up eligible for the cache. */
+		op_array->generic_parameters->defaults_cache_slot = zend_alloc_cache_slots(2);
 	}
 
 	zend_compile_params(params_ast, return_type_ast,

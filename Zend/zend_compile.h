@@ -156,6 +156,15 @@ typedef struct _zend_generic_parameter_list {
 	 * Written at runtime under the SHM allocator lock; NULL outside opcache
 	 * SHM (arena/file-cache copies). */
 	void    *monomorph_cache;
+	/* Offset (in the declaring op_array's own run_time_cache) of a 2-slot
+	 * cache used by a naked (non-turbofish) call to THIS function/method,
+	 * memoizing the all-defaults type_arg_table the same way a turbofish
+	 * call site's own cache slots do -- see zend_verify_speculative_generic_call.
+	 * (uint32_t)-1 means "not reserved" (only functions/methods that declare
+	 * generic parameters get slots reserved at all). Per-process, safe to use
+	 * even when the op_array's own metadata is SHM-persisted, exactly like
+	 * any other run_time_cache slot. */
+	uint32_t defaults_cache_slot;
 	zend_generic_parameter parameters[1];
 } zend_generic_parameter_list;
 

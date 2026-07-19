@@ -458,6 +458,20 @@ void zend_optimizer_compact_literals(zend_op_array *op_array, zend_optimizer_ctx
 
 		/* Update opcodes to use new literals table */
 		cache_size = zend_op_array_extension_handles * sizeof(void*);
+		if (op_array->generic_parameters
+				&& op_array->generic_parameters->defaults_cache_slot != (uint32_t) -1) {
+			/* zend_compile.c reserved a 2-slot cache here (slot[0] = table,
+			 * slot[1] = key) for zend_verify_speculative_generic_call's
+			 * per-function naked-call memo -- it isn't tied to any opcode, so
+			 * this scan (which rebuilds op_array->cache_size from scratch by
+			 * walking only opcode-attached cache users) would otherwise
+			 * silently drop it, leaving the recorded offset pointing at
+			 * whatever unrelated cache slot this pass assigns there instead.
+			 * Re-reserve it first, in the same position, before the scan
+			 * below hands out anything else. */
+			op_array->generic_parameters->defaults_cache_slot = cache_size;
+			cache_size += 2 * sizeof(void *);
+		}
 		opline = op_array->opcodes;
 		end = opline + op_array->last;
 		while (opline < end) {

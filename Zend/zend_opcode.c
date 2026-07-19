@@ -148,6 +148,7 @@ ZEND_API zend_generic_parameter_list *zend_generic_parameter_list_alloc(uint32_t
 	list->count = count;
 	list->persisted = false;
 	list->monomorph_cache = NULL;
+	list->defaults_cache_slot = (uint32_t) -1;
 	for (uint32_t i = 0; i < count; i++) {
 		list->parameters[i].name = NULL;
 		list->parameters[i].variance = 0;
@@ -597,6 +598,8 @@ ZEND_API void zend_cleanup_mutable_class_data(zend_class_entry *ce)
 	}
 }
 
+static void zend_release_defaults_cache_slot(zend_op_array *op_array);
+
 ZEND_API void destroy_zend_class(zval *zv)
 {
 	zend_property_info *prop_info;
@@ -765,6 +768,22 @@ ZEND_API void destroy_zend_class(zval *zv)
 				}
 			} ZEND_HASH_FOREACH_END();
 			zend_hash_destroy(&ce->properties_info);
+			/* A runtime-synthesized monomorph's own methods (e.g. Box<int>'s
+			 * clone of a still-generic method like pick<U=mixed>()) do not
+			 * reliably reach destroy_op_array via ce->function_table's own
+			 * hashtable-value destructor -- sweep explicitly here, where
+			 * ce->generic_type_args is also freed for the same "monomorph
+			 * needs its own explicit heap-resource cleanup" reason, before
+			 * the table itself goes away. No-op for any op_array that isn't
+			 * a still-generic method with a written cache slot. */
+			if (ce->function_table.nNumOfElements) {
+				zend_function *sweep_fn;
+				ZEND_HASH_MAP_FOREACH_PTR(&ce->function_table, sweep_fn) {
+					if (sweep_fn->type == ZEND_USER_FUNCTION) {
+						zend_release_defaults_cache_slot(&sweep_fn->op_array);
+					}
+				} ZEND_HASH_FOREACH_END();
+			}
 			zend_hash_destroy(&ce->function_table);
 			if (zend_hash_num_elements(&ce->constants_table)) {
 				zend_class_constant *c;
@@ -924,6 +943,34 @@ ZEND_API void zend_destroy_static_vars(zend_op_array *op_array)
 	}
 }
 
+/* Shared by destroy_op_array (reliable for template op_arrays) and
+ * destroy_zend_class's own method sweep (needed because runtime-synthesized
+ * monomorph method op_arrays do not reliably reach destroy_op_array via the
+ * normal ce->function_table hashtable-destructor path -- see the call site
+ * in destroy_zend_class for the full explanation). Releases the naked-call
+ * defaults cache reserved on op_array's own run_time_cache by
+ * zend_verify_speculative_generic_call, if one was ever written. */
+static void zend_release_defaults_cache_slot(zend_op_array *op_array)
+{
+	if (!op_array->generic_parameters
+	 || op_array->generic_parameters->defaults_cache_slot == (uint32_t) -1
+	 || !ZEND_MAP_PTR(op_array->run_time_cache)) {
+		return;
+	}
+	char *cache_buf = (char *) ZEND_MAP_PTR_GET(op_array->run_time_cache);
+	if (!cache_buf) {
+		return;
+	}
+	void **cache_slot = (void **) (cache_buf + op_array->generic_parameters->defaults_cache_slot);
+	zend_type_arg_table *t = (zend_type_arg_table *) cache_slot[0];
+	if (t) {
+		t->persisted = false;
+		zend_type_arg_table_destroy(t);
+		cache_slot[0] = NULL;
+		cache_slot[1] = NULL;
+	}
+}
+
 ZEND_API void destroy_op_array(zend_op_array *op_array)
 {
 	uint32_t i;
@@ -973,6 +1020,17 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 			}
 		}
 	}
+
+	/* Mirror of the scan above for zend_verify_speculative_generic_call's
+	 * per-FUNCTION (not per-call-site) cache: a naked call to a generic
+	 * function/method may have stashed its all-defaults zend_type_arg_table*
+	 * in the 2-slot cache reserved on THIS op_array's own run_time_cache
+	 * (defaults_cache_slot), marked persisted so per-frame teardown left it
+	 * alone. Release it here, once, when the declaring op_array itself goes
+	 * away. (Runtime-synthesized monomorph methods don't reliably reach this
+	 * function at all -- see destroy_zend_class's own call to
+	 * zend_release_defaults_cache_slot for the fallback that covers them.) */
+	zend_release_defaults_cache_slot(op_array);
 
 	if ((op_array->fn_flags & ZEND_ACC_HEAP_RT_CACHE)
 	 && ZEND_MAP_PTR(op_array->run_time_cache)) {
