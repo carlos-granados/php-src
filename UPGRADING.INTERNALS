@@ -254,6 +254,17 @@ PHP 8.6 INTERNALS UPGRADE NOTES
       split state used by the zendlex wrapper), CG(token_residual)
       (single-token pushback slot), and CG(generic_scope) (linked
       stack of in-scope type parameters).
+    . A function-like's own type parameters may not be declared while
+      lexically nested inside another generic function, method, or
+      closure (E_COMPILE_ERROR from
+      zend_compile_generic_type_parameter_list(), regardless of
+      whether the inner and outer parameter names collide). Bindings
+      are identified at runtime by a flat (origin, index) pair with no
+      record of which scope in the CG(generic_scope) chain they came
+      from, so a closure's own first type parameter and an outer
+      function's captured first type parameter would otherwise both
+      resolve to (FUNCTION_LIKE, 0) and alias. Class-like scopes are
+      unaffected (distinct origin tag from function-like).
     . New T_TURBOFISH lexer token (literal `::<`). The zendlex wrapper
       splits T_SR (`>>`), T_IS_GREATER_OR_EQUAL (`>=`), and T_SR_EQUAL
       (`>>=`) into separate `>` tokens whenever CG(type_arg_depth) is

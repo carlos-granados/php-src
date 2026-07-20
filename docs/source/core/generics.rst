@@ -6,6 +6,19 @@ PHP supports generic type parameters on classes, interfaces, traits, functions, 
 and arrow functions. They are *reified*, but reified along two different axes depending on the
 declaring entity:
 
+.. note::
+   A function, method, or closure may not declare its own type parameters while lexically nested
+   inside another generic function, method, or closure — ``function outer<T>() { return function
+   <U>() {}; }`` is a compile error, regardless of whether the inner and outer parameter names
+   collide. This is unrelated to (and stricter than) ordinary same-name shadowing, which is still
+   an error on its own. See "Binding resolution (no inference)" below for why: function-/
+   method-level bindings are identified at runtime by a flat (origin, index) pair with no record
+   of which lexical scope they came from, so a closure's own first type parameter and an outer
+   function's captured first type parameter would otherwise be indistinguishable when binding a
+   call to the closure. Class-like generics are unaffected — a generic method on a generic class
+   (``class Box<T> { function map<U>() {} }``) is fine, since class- and function-level parameters
+   use distinct origin tags and never collide.
+
 -  **Class-like generics are monomorphised.** Each distinct argument tuple at a generic class,
    interface, or trait synthesises a separate ``zend_class_entry`` — ``Box<int>`` and
    ``Box<string>`` are distinct classes whose canonical names are spelled out
@@ -236,6 +249,17 @@ First-class callables bind at creation: ``id::<int>(...)`` runs the same VERIFY 
 pending frame, and ``ZEND_CALLABLE_CONVERT`` captures the resolved table into the closure
 (``zend_closure_capture_type_args``), bypassing the per-func closure cache so sites with
 different type arguments never share a closure.
+
+A binding is identified at runtime by a flat ``(origin, index)`` pair — which parameter-list slot,
+declared by a function-like or a class-like — with no record of *which* lexical scope it came
+from. This is why a function-like's own type parameters may never be declared while lexically
+nested inside another generic function, method, or closure: the compiler rejects it outright
+(``E_COMPILE_ERROR`` from ``zend_compile_generic_type_parameter_list``) rather than accept the
+ambiguity. A closure's own first type parameter and an outer function's captured first type
+parameter would both resolve to ``(FUNCTION_LIKE, 0)``, and the frame's captured table would
+silently satisfy the closure's own required slot instead of correctly rejecting a call missing its
+own turbofish. Class-like scopes don't have this problem — ``class Box<T> { function map<U>() {} }``
+is fine, since a class's own parameters use a distinct origin tag from a method's own.
 
 Bare ``T``-ref resolution
 -------------------------
@@ -475,15 +499,11 @@ gap). The subsystem directories are:
 - ``reflection/`` (both trees) — the ``ReflectionClass``/``ReflectionGeneric*`` surface and the
   monomorph class hierarchy.
 
-Documented gaps (``--XFAIL--`` tests, tracked for follow-up):
-
-- ``jit/function_jit_generic.phpt`` — function-mode JIT mis-compiles some concrete-turbofish
-  generic calls into a by-name lookup of the (non-existent) function-monomorph name; tracing JIT
-  and the interpreter are correct. Belongs to the JIT-for-generics workstream.
-- ``inheritance/extends_args/reified_instanceof_generic_parent.phpt`` — reified ``instanceof``
-  reifies transitively through generic *interfaces* but not through a forwarding generic *parent
-  class* (a monomorph extends its template, so the substituted parent is not in the linear
-  ancestry).
+No outstanding ``--XFAIL--`` gaps: the suite previously tracked two — a function-mode JIT
+mis-compilation of concrete-turbofish generic calls (``jit/function_jit_generic.phpt``) and
+reified ``instanceof`` not reifying transitively through a forwarding generic parent class
+(``inheritance/extends_args/reified_instanceof_generic_parent.phpt``) — both are now fixed and
+those tests assert the correct passing behavior directly.
 
 Behaviours pinned as current-but-notable (regular passing tests, not gaps):
 

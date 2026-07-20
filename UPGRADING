@@ -191,7 +191,7 @@ PHP 8.6 UPGRADE NOTES
   . Added support for runtime-bound-checked generics. Classes, interfaces,
     traits, functions, methods, closures, and arrow functions can now declare
     type parameters with optional bounds (`T : Foo`), defaults (`T = int`),
-    and variance markers (`+T`, `-T`):
+    and variance markers (`out T` for covariant, `in T` for contravariant):
 
         class Box<T : object> {
             public T $value;

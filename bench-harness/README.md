@@ -78,8 +78,7 @@ shape resolve from the compile-time turbofish args with **no runtime table**, so
 the counters correctly read 0. `callsite_cache_entries` therefore stays 0 for
 explicit-turbofish-heavy code (the concrete fast path) and moves for
 non-turbofish/`= T`-default call sites. Class monomorph growth is the counter to
-watch for the memory story; function-call-path counters will get more exercise
-in Pass 2 (Psl `Vec`/`Dict`/`Iter`).
+watch for the memory story.
 
 ## Usage
 
@@ -90,18 +89,24 @@ bench-harness/build.sh
 bench-harness/run-baselines.sh
 ```
 
-`build.sh` builds `master` (ref `9498bc3ee13`) and `reify` (HEAD + the
-uncommitted instrumentation, applied as a patch — not committed) as release
-worktrees. `run-baselines.sh` writes `results/baseline.json` (cold/warm × jit ×
-build Ir with deltas + `cost_of_generics`) plus the micro per-section JSON and
-the counter smoke test.
+`build.sh` builds `master` (ref `9498bc3ee13`) and `reify` (HEAD, plus any
+uncommitted working-tree changes carried over as a patch — useful while
+iterating; the counter instrumentation itself has been committed since
+`11b61f4cc1c`) as release worktrees. `run-baselines.sh` writes
+`results/baseline.json` (cold/warm × jit × build Ir with deltas +
+`cost_of_generics`) plus the micro per-section JSON and the counter smoke
+test.
 
 Env knobs: `WARMUP` (default 20) warm-phase warmup requests; `BUILDROOT`
 (default `$TMPDIR/bench-builds` or `/tmp/bench-builds`); `MASTER_REF`, `REIFY_REF`.
 
-## Pass 2 (deferred): Psl + BackwardCompatibilityCheck
+## Real-world workloads: `pass2/`
 
-The real-world headline (BCC scanning psl / doctrine-orm with a generics-native
-Psl) is gated on this foundation and on `composer` (installed by `setup.sh`).
-Same cold/warm Ir method, plus peak RSS and the `zend_test_generics_stats()`
-counts.
+`pass2/` (see `pass2/README.md`) measures the same cold/warm Ir method against
+three real applications: a maintained BackwardCompatibilityCheck fork scanning
+`nikic/php-parser`, `doctrine/collections`, and `azjezz/psl` (BCC's own
+dependency) — each with a native-generics-converted variant checked out
+alongside the original, so both the tax (generics unused) and the cost of
+using generics are measured on real code, not just the synthetic workloads
+above. Requires `composer` (installed by `pass2/setup.sh`). The current,
+final results are in `results/NOTES.md`.
