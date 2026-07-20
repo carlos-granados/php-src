@@ -1896,6 +1896,26 @@ ZEND_API void zend_verify_speculative_generic_call(zend_execute_data *call)
 			immutable_uncached = (call->func->common.fn_flags & ZEND_ACC_IMMUTABLE)
 				&& !cache_slot[0];
 		}
+		/* The tracker below is what makes it safe for zend_build_or_get_
+		 * cached_type_args() to persist a table into an immutable op_array's
+		 * cache slot: shutdown_executor() walks the tracker to release every
+		 * such table, since normal per-op_array teardown never runs for
+		 * immutable op_arrays. Past the tracker's fixed capacity there is no
+		 * way to record a table it would still be safe to persist -- so
+		 * refuse the cache slot itself (pass NULL) once full, forcing a
+		 * fresh, unpersisted table that ordinary per-call frame teardown
+		 * owns and frees normally, exactly the "falls back to uncached
+		 * rebuild" behavior this cache is documented to have. Skipping this
+		 * check would let zend_build_or_get_cached_type_args stash a
+		 * persisted table nothing ever releases -- a real per-request leak,
+		 * confirmed via the counters in zend_test_generics_stats() reaching
+		 * the cap and staying there while more distinct immutable generic
+		 * functions kept getting called with defaults. */
+		if (immutable_uncached
+				&& EG(immutable_defaults_cache_tables_count) >= ZEND_IMMUTABLE_DEFAULTS_CACHE_MAX) {
+			cache_slot = NULL;
+			immutable_uncached = false;
+		}
 		zend_type_arg_table *t = zend_build_or_get_cached_type_args(call, NULL, cache_slot);
 		if (immutable_uncached && t && cache_slot[0] == t
 				&& EG(immutable_defaults_cache_tables_count) < ZEND_IMMUTABLE_DEFAULTS_CACHE_MAX) {
