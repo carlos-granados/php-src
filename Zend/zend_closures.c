@@ -157,6 +157,17 @@ ZEND_METHOD(Closure, call)
 	if (closure->func.common.fn_flags & ZEND_ACC_GENERATOR) {
 		zval new_closure;
 		zend_create_closure(&new_closure, &closure->func, newclass, closure->called_scope, newthis);
+		/* Unlike the non-generator branch below (which borrows the pointer
+		 * directly) and clone/bindTo (which go through this same helper),
+		 * zend_create_closure() here builds a genuinely new, independent
+		 * closure object -- it does not carry the source's captured T-table
+		 * over on its own. Without this, a generator closure created inside
+		 * a generic frame and invoked via ->call() runs with type_args ==
+		 * NULL, losing enforcement of (or crashing on) any outer T-ref its
+		 * body resolves. */
+		if (closure->captured_type_args) {
+			zend_closure_capture_type_args(&new_closure, closure->captured_type_args);
+		}
 		closure = (zend_closure *) Z_OBJ(new_closure);
 		fci_cache.function_handler = &closure->func;
 
