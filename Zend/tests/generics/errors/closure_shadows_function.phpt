@@ -1,5 +1,5 @@
 --TEST--
-Errors: closure type parameter shadows enclosing function type parameter
+Errors: closure with its own type parameter cannot be declared inside a generic function
 --FILE--
 <?php
 function f<T>(): void {
@@ -7,4 +7,4 @@ function f<T>(): void {
 }
 ?>
 --EXPECTF--
-Fatal error: Type parameter T shadows enclosing type parameter in %s on line %d
+Fatal error: A function, method, or closure with its own type parameters cannot be declared inside another generic function, method, or closure in %s on line %d

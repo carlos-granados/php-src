@@ -2206,6 +2206,27 @@ static zend_generic_parameter_list *zend_compile_generic_type_parameter_list(
 	zend_ast_list *list = zend_ast_get_list(list_ast);
 	ZEND_ASSERT(list->children > 0);
 
+	/* A function-like's own type parameters and an enclosing function-like
+	 * scope's type parameters are both identified at runtime by a flat
+	 * (origin, index) pair with no record of which scope they came from, so
+	 * a closure's own T-at-index-0 and an outer function's captured
+	 * T-at-index-0 would otherwise be indistinguishable when binding calls to
+	 * the closure -- silently aliasing an outer binding onto an unrelated
+	 * inner slot instead of raising the missing-turbofish error it should.
+	 * Forbid the nesting outright rather than accept the ambiguity. Class-like
+	 * scopes are unaffected: they use a distinct origin tag, so e.g. a
+	 * generic method's own type parameter never collides with its class's. */
+	if (origin == ZEND_GENERIC_ORIGIN_FUNCTION_LIKE) {
+		for (zend_generic_scope_entry *e = CG(generic_scope); e; e = e->outer) {
+			if (e->origin == ZEND_GENERIC_ORIGIN_FUNCTION_LIKE) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"A function, method, or closure with its own type parameters "
+					"cannot be declared inside another generic function, method, "
+					"or closure");
+			}
+		}
+	}
+
 	zend_generic_parameter_list *params =
 		zend_generic_parameter_list_alloc(list->children, /* persistent */ false);
 
