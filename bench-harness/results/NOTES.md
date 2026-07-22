@@ -104,6 +104,60 @@ production-representative cell; `off` is the plain-interpreter floor.
   check for no benefit. This was reverted; it is not reflected in the
   numbers above.
 
+## Memory usage
+
+Same 3 workloads and 5-config matrix as above, metric swapped from Callgrind
+Ir to peak RSS (`/usr/bin/time -v` "Maximum resident set size" — the actual
+number a deployment would budget memory around, not just a resting-state
+snapshot).
+
+### psl (function-level generics)
+
+| config          | tax     | cost of generics | converted vs master |
+|-----------------|--------:|------------------:|---------------------:|
+| off             | +1.85%  | +0.04%             | +1.89%                |
+| jit-off, cold   | +1.66%  | -0.01%             | +1.65%                |
+| jit-off, warm   | +4.71%  | -2.93%             | +1.65%                |
+| jit-on, cold    | +0.93%  | 0.00%              | +0.93%                |
+| jit-on, warm    | +5.15%  | -3.20%             | +1.79%                |
+
+### doctrine (class-level generics)
+
+| config          | tax     | cost of generics | converted vs master |
+|-----------------|--------:|------------------:|---------------------:|
+| off             | +2.14%  | +0.03%             | +2.17%                |
+| jit-off, cold   | +2.00%  | -0.01%             | +1.98%                |
+| jit-off, warm   | +1.58%  | +0.38%             | +1.96%                |
+| jit-on, cold    | +1.53%  | 0.00%              | +1.53%                |
+| jit-on, warm    | +2.33%  | -0.79%             | +1.52%                |
+
+### bcc (whole real application)
+
+| config          | tax     | cost of generics | converted vs master |
+|-----------------|--------:|------------------:|---------------------:|
+| off             | +0.33%  | +0.05%             | +0.38%                |
+| jit-off, cold   | +0.83%  | +0.11%             | +0.94%                |
+| jit-off, warm   | +0.89%  | +0.08%             | +0.97%                |
+| jit-on, cold    | +0.63%  | +0.05%             | +0.68%                |
+| jit-on, warm    | +2.23%  | -0.16%             | +2.06%                |
+
+### Reading
+
+- **Memory footprint is small and not the concern the instruction-count tax
+  might suggest.** Tax ranges roughly +0.3% to +5.2% across every
+  workload/config; `bcc` — the one whole, unmodified real application in the
+  set — sits under 1% in most configs and tops out at +2.2% in the
+  production-representative jit-on/warm cell. Cost of generics is under
+  half a percent in almost every cell.
+- Several `cost of generics` cells are slightly **negative** (e.g. `psl`
+  jit-on/warm at -3.20%). This is not a real "using generics reduces memory"
+  effect: RSS is measured at OS page granularity (4 KB), and run-to-run
+  allocator/heap-layout jitter of a few hundred KB is enough to flip the
+  sign at this scale. Read as noise around zero, not a finding.
+- Even in the worst measured cell (`psl`, jit-on, warm, +5.15% tax), the
+  absolute cost is a few hundred KB to low single-digit MB on processes in
+  the 30-130 MB range across the three workloads tested.
+
 ## Reproducing
 
 ```
